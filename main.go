@@ -1,16 +1,21 @@
 package main
 
 import (
-	"bytes"
+	// "bytes"
 	"flag"
 	"fmt"
 	"github.com/jackpal/bencode-go"
-	"io/ioutil"
+	// "io"
+	// "io/ioutil"
 	"net/http"
 	"os"
 )
 
 func init() {
+}
+
+type TorrentInfor struct {
+	infoUrl string
 }
 
 func main() {
@@ -22,28 +27,26 @@ func main() {
 		os.Exit(0)
 	}
 
-	torrent, err := ioutil.ReadFile(args[0])
+	torrentBuf, err := os.Open(args[0])
 	if err != nil {
 		fmt.Printf("Problem with ", args[0])
 	}
 
-	torrentBuf := bytes.NewReader(torrent)
-
-	torrentParts, _ := benlex.Decode(torrentBuf)
-	announce := torrentParts["announce"]
-	announceUrl := announce.(string)
-
-	resp, err := http.Get(announceUrl)
+	torrentParts, _ := bencode.Decode(torrentBuf)
+	// We have to asser the type in order to work with it.
+	t := torrentParts.(map[string]interface{})
+	url := t["announce"].(string)
+	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Couldn't connect to:", announceUrl)
+		fmt.Printf("Errer:", err)
 	} else {
-		fmt.Println(resp, "From", announceUrl)
+		fmt.Println(resp)
 	}
-
 	if *verbose {
-		for k, v := range torrentParts {
-			fmt.Printf("%s: %q\n", k, v)
+		for k, v := range t {
+			fmt.Printf("%q, %q", k, v)
 		}
+		fmt.Printf("%T", torrentParts)
 	}
 
 }
