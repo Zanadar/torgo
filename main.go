@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/zanadar/benlex"
 	"io/ioutil"
+	"net/http"
 	"os"
 )
 
@@ -29,6 +30,15 @@ func main() {
 	torrentBuf := bytes.NewReader(torrent)
 
 	torrentParts, _ := benlex.Decode(torrentBuf)
+	announce := torrentParts["announce"]
+	announceUrl := announce.(string)
+
+	resp, err := http.Get(announceUrl)
+	if err != nil {
+		fmt.Println("Couldn't connect to:", announceUrl)
+	} else {
+		fmt.Println(resp, "From", announceUrl)
+	}
 
 	if *verbose {
 		for k, v := range torrentParts {
