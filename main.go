@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/zanadar/benlex"
+	"github.com/jackpal/bencode-go"
 	"io/ioutil"
 	"net/http"
 	"os"
