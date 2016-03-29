@@ -5,18 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"github.com/jackpal/bencode-go"
-	"sort"
-	// "io"
-	// "io/ioutil"
 	"net/http"
 	"os"
+	"sort"
 )
 
 func init() {
 }
 
 type TorrentInfor struct {
-	infoUrl string
+	Info map[string]interface{}
+}
+type Info struct {
 }
 
 func main() {
@@ -34,29 +34,17 @@ func main() {
 	}
 
 	torrentParts, _ := bencode.Decode(torrentBuf)
+
 	// We have to assert the type in order to work with it.
 	t := torrentParts.(map[string]interface{})
 	url := t["announce"].(string)
 
 	//All of this monkey business is to sort the hash the info dictionay
 	// The keys have to appear in consistent order ....
-
 	info := t["info"].(map[string]interface{})
-	keys := []string{}
-	for k, _ := range info {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	infoBytes := []byte{}
-	for _, k := range keys {
-		infoBytes = append(infoBytes, []byte(k)...)
-		switch typ := info[k].(type) {
-		case int64:
-			infoBytes = append(infoBytes, byte(typ))
-		}
-	}
-	infoSHA := sha1.Sum(infoBytes)
-	fmt.Printf("\ninfo SHA1: % x\n", infoSHA)
+	infoHash := sha1.New()
+	bencode.Marshal(infoHash, info)
+	fmt.Printf("Sha of inforString: % x", infoHash.Sum(nil))
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -67,11 +55,6 @@ func main() {
 
 	//Feedback
 	if *verbose {
-		for k, v := range t {
-			if k != "info" {
-				fmt.Printf("%s: %X\n\n", k, v)
-			}
-		}
 		for k, v := range info {
 			fmt.Printf("%s: %q\n\n", k, v)
 		}
