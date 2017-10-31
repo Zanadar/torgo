@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
+
+	"github.com/davecgh/go-spew/spew"
 
 	"github.com/jackpal/bencode-go"
 )
@@ -17,9 +18,9 @@ func init() {
 }
 
 type TorrentInfo struct {
-	Info
 	Announce string
 	Encoding string
+	Info
 }
 type Info struct {
 	Name        string
@@ -47,27 +48,14 @@ func main() {
 	errCheck(err)
 	torrentParts, err := bencode.Decode(torrentBuf)
 	errCheck(err)
+
 	t := torrentParts.(map[string]interface{})
-
-	//All of this monkey business is to sort the hash the info dictionay
-	// The keys have to appear in consistent order ....
-
 	info := t["info"].(map[string]interface{})
-	keys := []string{}
-	for k := range info {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	infoBytes := []byte{}
-	for _, k := range keys {
-		infoBytes = append(infoBytes, []byte(k)...)
-		switch typ := info[k].(type) {
-		case int64:
-			infoBytes = append(infoBytes, byte(typ))
-		}
-	}
-	infoSHA := sha1.Sum(infoBytes)
-	fmt.Printf("\ninfo SHA1: % x\n", infoSHA)
+	infoHash := sha1.New()
+	err = bencode.Marshal(infoHash, info)
+	errCheck(err)
+	spew.Dump(infoHash.Sum(nil)) // This is correct per: https://allenkim67.github.io/programming/2016/05/04/how-to-make-your-own-bittorrent-client.html#info-hash
+	// <Buffer 11 7e 3a 66 65 e8 ff 1b 15 7e 5e c3 78 23 57 8a db 8a 71 2b>
 
 	torrentInfo := &TorrentInfo{}
 	torrentBuf.Seek(0, 0) // rewind
@@ -75,22 +63,17 @@ func main() {
 	errCheck(err)
 	fmt.Printf("\n\n\ntorrentInfo: \n %#v \n\n", torrentInfo)
 
-	infoHash := sha1.New()
-	bencode.Marshal(infoHash, torrentInfo.Info)
-	fmt.Printf("Sha of inforString: %#x", infoHash.Sum(nil))
-
 	url, err := url.Parse(torrentInfo.Announce)
 	if err != nil {
 		fmt.Printf("Errer: %e", err)
 	}
+	id := [20]byte{} // This is important!  The ID must be 20 bytes long
+	copy(id[:], "boblog123")
 	q := url.Query()
 	q.Add("info_hash", string(infoHash.Sum(nil)))
-	q.Add("peer_id", "boblog123")
+	q.Add("peer_id", string(id[:]))
 	q.Add("left", strconv.Itoa(int(torrentInfo.Info.Length)))
 	url.RawQuery = q.Encode()
-
-	//All of this monkey business is to sort the hash the info dictionay
-	// The keys have to appear in consistent order ....
 
 	resp, err := http.Get(url.String())
 	if err != nil {
