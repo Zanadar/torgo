@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/jackpal/bencode-go"
@@ -27,6 +28,12 @@ type Info struct {
 	PieceLength int64 `bencode:"piece length"`
 }
 
+func errCheck(err error) {
+	if err != nil {
+		fmt.Printf("Problem: %e", err)
+	}
+}
+
 func main() {
 	verbose := flag.Bool("v", false, "Verbose output")
 	flag.Parse()
@@ -37,22 +44,40 @@ func main() {
 	}
 
 	torrentBuf, err := os.Open(args[0])
-	if err != nil {
-		fmt.Printf("Problem with ", args)
+	errCheck(err)
+	torrentParts, err := bencode.Decode(torrentBuf)
+	errCheck(err)
+	t := torrentParts.(map[string]interface{})
+
+	//All of this monkey business is to sort the hash the info dictionay
+	// The keys have to appear in consistent order ....
+
+	info := t["info"].(map[string]interface{})
+	keys := []string{}
+	for k := range info {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	infoBytes := []byte{}
+	for _, k := range keys {
+		infoBytes = append(infoBytes, []byte(k)...)
+		switch typ := info[k].(type) {
+		case int64:
+			infoBytes = append(infoBytes, byte(typ))
+		}
+	}
+	infoSHA := sha1.Sum(infoBytes)
+	fmt.Printf("\ninfo SHA1: % x\n", infoSHA)
 
 	torrentInfo := &TorrentInfo{}
+	torrentBuf.Seek(0, 0) // rewind
 	err = bencode.Unmarshal(torrentBuf, torrentInfo)
-	if err != nil {
-		fmt.Printf("Problem unmarshalling ", err)
-	}
+	errCheck(err)
 	fmt.Printf("\n\n\ntorrentInfo: \n %#v \n\n", torrentInfo)
-
-	// We have to assert the type in order to work with it.
 
 	infoHash := sha1.New()
 	bencode.Marshal(infoHash, torrentInfo.Info)
-	fmt.Printf("Sha of inforString: % x", infoHash.Sum(nil))
+	fmt.Printf("Sha of inforString: %#x", infoHash.Sum(nil))
 
 	url, err := url.Parse(torrentInfo.Announce)
 	if err != nil {
