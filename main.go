@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha1"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +23,7 @@ type TorrentInfo struct {
 	Announce string
 	Encoding string
 	Info
+	InfoHash [20]byte
 }
 type Info struct {
 	Name        string
@@ -28,7 +32,7 @@ type Info struct {
 	PieceLength int64 `bencode:"piece length"`
 }
 
-type TrackResponse struct {
+type TrackerResponse struct {
 	FailureReason  string `bencode:"failure reason"`
 	WarningMessage string `bencode:"warning message"`
 	Interval       int
@@ -43,6 +47,17 @@ type Peer struct {
 	ID   int `bencode:"peer id"`
 	IP   string
 	Port int
+}
+
+func (p Peer) String() string {
+	return fmt.Sprintf("%s:%d", p.IP, p.Port)
+}
+
+type Torrent struct {
+	PeerId   []byte // Our id that we send to the clients
+	InfoHash []byte
+	Peers    []Peer
+	TrackerResponse
 }
 
 /*
@@ -77,7 +92,27 @@ func main() {
 
 	torrentBuf, err := os.Open(args[0])
 	errCheck(err)
-	torrentParts, err := bencode.Decode(torrentBuf)
+
+	torrentInfo, err := parseTorrent(torrentBuf)
+	errCheck(err)
+
+	torrent, err := callTracker(*torrentInfo)
+	errCheck(err)
+
+	handshakeMsg := NewHandshake(torrent)
+	errCheck(err)
+
+	conn, err := net.Dial("tcp", torrent.Peers[0].String())
+	defer conn.Close()
+	errCheck(err)
+	conn.Write([]byte(handshakeMsg.String()))
+	resp := []byte{}
+	read, err := bufio.NewReader(conn).Read(resp)
+	spew.Dump(read, resp)
+}
+
+func parseTorrent(torrentF io.ReadSeeker) (*TorrentInfo, error) {
+	torrentParts, err := bencode.Decode(torrentF)
 	errCheck(err)
 
 	t := torrentParts.(map[string]interface{})
@@ -89,26 +124,31 @@ func main() {
 	// <Buffer 11 7e 3a 66 65 e8 ff 1b 15 7e 5e c3 78 23 57 8a db 8a 71 2b>
 
 	torrentInfo := &TorrentInfo{}
-	torrentBuf.Seek(0, 0) // rewind
-	err = bencode.Unmarshal(torrentBuf, torrentInfo)
+	torrentF.Seek(0, 0) // rewind
+	err = bencode.Unmarshal(torrentF, torrentInfo)
 	errCheck(err)
+	copy(torrentInfo.InfoHash[:], infoHash.Sum(nil)) // copy the hash into a full slice of the array
 
-	url, err := url.Parse(torrentInfo.Announce)
+	return torrentInfo, err
+}
+
+func callTracker(ti TorrentInfo) (Torrent, error) {
+	url, err := url.Parse(ti.Announce)
 	errCheck(err)
 	id := [20]byte{} // This is important!  The ID must be 20 bytes long
 	copy(id[:], "boblog123")
 
 	q := url.Query()
-	q.Add("info_hash", string(infoHash.Sum(nil)))
+	q.Add("info_hash", string(ti.InfoHash[:]))
 	q.Add("peer_id", string(id[:]))
-	q.Add("left", strconv.Itoa(int(torrentInfo.Info.Length)))
+	q.Add("left", strconv.Itoa(int(ti.Info.Length)))
 	url.RawQuery = q.Encode()
 
 	resp, err := http.Get(url.String())
 	errCheck(err)
 	defer resp.Body.Close()
 
-	trackerResp := &TrackResponse{}
+	trackerResp := &TrackerResponse{}
 	err = bencode.Unmarshal(resp.Body, trackerResp)
 	errCheck(err)
 
@@ -123,10 +163,20 @@ func main() {
 			peerBytes[3],
 		}
 		port := int(peerBytes[4])*256 + int(peerBytes[5])
-		peers = append(peers, Peer{ID: i,
+		peers = append(peers, Peer{
+			ID:   i,
 			IP:   fmt.Sprintf("%d.%d.%d.%d", ip...),
 			Port: port,
 		})
 	}
 	spew.Dump(peers)
+
+	torrent := Torrent{
+		TrackerResponse: *trackerResp,
+		InfoHash:        ti.InfoHash[:],
+		PeerId:          id[:],
+		Peers:           peers,
+	}
+
+	return torrent, err
 }

@@ -12,12 +12,19 @@ type Handshake struct {
 	PeerId   []byte
 }
 
-func (h Handshake) Unmarshall() (string, err) {
+func (h Handshake) String() string {
 	handShake := []byte{byte(pstrlen)}
 	handShake = append(handShake, []byte(pstr)...)
 	handShake = append(handShake, reserved[:]...) // Make array to slice
 	handShake = append(handShake, []byte(h.InfoHash)...)
 	handShake = append(handShake, []byte(h.PeerId)...)
 
-	return handShake, nil
+	return string(handShake)
+}
+
+func NewHandshake(t Torrent) Handshake {
+	return Handshake{
+		InfoHash: t.InfoHash,
+		PeerId:   t.PeerId,
+	}
 }
