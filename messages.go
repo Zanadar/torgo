@@ -1,7 +1,5 @@
 package main
 
-import "github.com/davecgh/go-spew/spew"
-
 const (
 	pstrlen = 19
 	pstr    = "BitTorrent protocol"
@@ -21,7 +19,6 @@ func (h Handshake) Marshall() []byte {
 	handShake = append(handShake, []byte(h.InfoHash)...)
 	handShake = append(handShake, []byte(h.PeerId)...)
 
-	spew.Dump(handShake)
 	return handShake
 }
 

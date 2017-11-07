@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/jackpal/bencode-go"
 )
 
@@ -161,6 +164,13 @@ func main() {
 		os.Exit(0)
 	}
 
+	var logger log.Logger
+	{
+		if *debug {
+			logLevel = level.AllowAll()
+		}
+	}
+
 	torrentBuf, err := os.Open(args[0])
 	errCheck(err)
 
@@ -175,18 +185,15 @@ func main() {
 	errCheck(err)
 
 	conn, err := net.Dial("tcp", torrent.Peers[1].String())
-	spew.Dump(conn, err)
+	defer conn.Close()
 	errCheck(err)
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	spew.Dump(rw)
 
 	n, err := rw.Write(handshakeMsg.Marshall())
 	errCheck(err)
 	err = rw.Flush()
 	errCheck(err)
-	spew.Dump(n)
-	resp := [68]byte{}
+	resp := [200]byte{}
 	n, err = rw.Read(resp[:])
 	spew.Dump(n, resp)
-	defer conn.Close()
 }
