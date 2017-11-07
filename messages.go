@@ -1,5 +1,7 @@
 package main
 
+import "github.com/davecgh/go-spew/spew"
+
 const (
 	pstrlen = 19
 	pstr    = "BitTorrent protocol"
@@ -12,14 +14,15 @@ type Handshake struct {
 	PeerId   []byte
 }
 
-func (h Handshake) String() string {
-	handShake := []byte{byte(pstrlen)}
+func (h Handshake) Marshall() []byte {
+	handShake := []byte{byte(19)}
 	handShake = append(handShake, []byte(pstr)...)
 	handShake = append(handShake, reserved[:]...) // Make array to slice
 	handShake = append(handShake, []byte(h.InfoHash)...)
 	handShake = append(handShake, []byte(h.PeerId)...)
 
-	return string(handShake)
+	spew.Dump(handShake)
+	return handShake
 }
 
 func NewHandshake(t Torrent) Handshake {

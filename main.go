@@ -82,35 +82,6 @@ func errCheck(err error) {
 	}
 }
 
-func main() {
-	flag.Parse()
-	args := flag.Args()
-	if len(args) < 1 {
-		fmt.Println("You need to supply a torrent file!")
-		os.Exit(0)
-	}
-
-	torrentBuf, err := os.Open(args[0])
-	errCheck(err)
-
-	torrentInfo, err := parseTorrent(torrentBuf)
-	errCheck(err)
-
-	torrent, err := callTracker(*torrentInfo)
-	errCheck(err)
-
-	handshakeMsg := NewHandshake(torrent)
-	errCheck(err)
-
-	conn, err := net.Dial("tcp", torrent.Peers[0].String())
-	defer conn.Close()
-	errCheck(err)
-	conn.Write([]byte(handshakeMsg.String()))
-	resp := []byte{}
-	read, err := bufio.NewReader(conn).Read(resp)
-	spew.Dump(read, resp)
-}
-
 func parseTorrent(torrentF io.ReadSeeker) (*TorrentInfo, error) {
 	torrentParts, err := bencode.Decode(torrentF)
 	errCheck(err)
@@ -143,6 +114,7 @@ func callTracker(ti TorrentInfo) (Torrent, error) {
 	q.Add("peer_id", string(id[:]))
 	q.Add("left", strconv.Itoa(int(ti.Info.Length)))
 	url.RawQuery = q.Encode()
+	spew.Dump(q)
 
 	resp, err := http.Get(url.String())
 	errCheck(err)
@@ -179,4 +151,42 @@ func callTracker(ti TorrentInfo) (Torrent, error) {
 	}
 
 	return torrent, err
+}
+
+func main() {
+	flag.Parse()
+	args := flag.Args()
+	if len(args) < 1 {
+		fmt.Println("You need to supply a torrent file!")
+		os.Exit(0)
+	}
+
+	torrentBuf, err := os.Open(args[0])
+	errCheck(err)
+
+	torrentInfo, err := parseTorrent(torrentBuf)
+	errCheck(err)
+
+	torrent, err := callTracker(*torrentInfo)
+	errCheck(err)
+
+	handshakeMsg := NewHandshake(torrent)
+	spew.Dump(torrent)
+	errCheck(err)
+
+	conn, err := net.Dial("tcp", torrent.Peers[1].String())
+	spew.Dump(conn, err)
+	errCheck(err)
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	spew.Dump(rw)
+
+	n, err := rw.Write(handshakeMsg.Marshall())
+	errCheck(err)
+	err = rw.Flush()
+	errCheck(err)
+	spew.Dump(n)
+	resp := [68]byte{}
+	n, err = rw.Read(resp[:])
+	spew.Dump(n, resp)
+	defer conn.Close()
 }
