@@ -1,5 +1,11 @@
 package main
 
+import (
+	"github.com/davecgh/go-spew/spew"
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
+)
+
 const (
 	pstrlen = 19
 	pstr    = "BitTorrent protocol"
@@ -19,12 +25,18 @@ func (h Handshake) Marshall() []byte {
 	handShake = append(handShake, []byte(h.InfoHash)...)
 	handShake = append(handShake, []byte(h.PeerId)...)
 
+	spew.Dump(handShake)
+
 	return handShake
 }
 
-func NewHandshake(t Torrent) Handshake {
-	return Handshake{
+func NewHandshake(t Torrent, logger log.Logger) Handshake {
+	handshake := Handshake{
 		InfoHash: t.InfoHash,
 		PeerId:   t.PeerId,
 	}
+
+	level.Debug(logger).Log("handshake", t.InfoHash)
+
+	return handshake
 }
