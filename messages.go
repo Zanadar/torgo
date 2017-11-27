@@ -6,8 +6,6 @@ import (
 	"errors"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
 )
 
 const (
@@ -38,17 +36,6 @@ func (h Handshake) Marshall() []byte {
 	spew.Dump(handShake)
 
 	return handShake
-}
-
-func NewHandshake(t *Torrent, logger log.Logger) Handshake {
-	handshake := Handshake{
-		InfoHash: t.ti.InfoHash,
-		PeerId:   t.ti.PeerId,
-	}
-
-	level.Debug(logger).Log("handshake", t.ti.InfoHash)
-
-	return handshake
 }
 
 func readMessage(r *bufio.ReadWriter) (message, error) {

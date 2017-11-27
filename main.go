@@ -58,16 +58,44 @@ func (p Peer) String() string {
 type Torrent struct {
 	ti TorrentInfo
 	TrackerResponse
+	Handshake
 	peerConns map[Peer]bufio.ReadWriter
 	msgs      chan message
 }
 
-func (t *Torrent) readLoop() {
-	// read shit from clients
+func (t *Torrent) readLoop(rw *bufio.ReadWriter) {
+	n, err := rw.Write(t.Handshake.Marshall())
+	errCheck(err)
+	err = rw.Flush()
+	errCheck(err)
+	resp := [68]byte{} // we probably need to parse this and save the id and make sure its a legit connection
+	n, err = rw.Read(resp[:])
+	spew.Dump(n, resp)
+
+	// start receiving messages
+	for {
+		msg, err := readMessage(rw)
+		errCheck(err)
+		if err != nil {
+			break
+		}
+		t.msgs <- msg
+	}
 }
 
 func (t *Torrent) writeLoop() {
 	// send shit to clients
+}
+
+// handle messages sent on the chan
+func (t *Torrent) handleMessages() {
+	for {
+		select {
+		case msg := <-t.msgs:
+			spew.Dump(msg)
+			spew.Dump("heya!")
+		}
+	}
 }
 
 func errCheck(err error) {
@@ -118,6 +146,7 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 	trackerResp := &TrackerResponse{}
 	err = bencode.Unmarshal(resp.Body, trackerResp)
 	errCheck(err)
+	/* level.Debug(ti.logger).Log("response", spew.Sdump(trackerResp)) */
 
 	peers := []Peer{}
 	var ip []interface{}
@@ -137,6 +166,7 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 		})
 	}
 	trackerResp.PeerList = peers
+	/* level.Debug(ti.logger).Log("peers", spew.Sdump(peers)) */
 
 	return trackerResp, nil
 }
@@ -146,8 +176,17 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	handshake := Handshake{
+		InfoHash: ti.InfoHash,
+		PeerId:   ti.PeerId,
+	}
+
+	level.Debug(logger).Log("handshake", ti.InfoHash)
+
 	torrent := &Torrent{
 		TrackerResponse: *trackerResp,
+		Handshake:       handshake,
 		ti:              ti,
 		peerConns:       make(map[Peer]bufio.ReadWriter),
 		msgs:            make(chan message),
@@ -184,7 +223,6 @@ func main() {
 	torrent, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
 	errCheck(err)
 
-	handshakeMsg := NewHandshake(torrent, logger)
 	errCheck(err)
 	spew.Dump(torrent.PeerList)
 
@@ -194,24 +232,6 @@ func main() {
 	errCheck(err)
 	// save this somewhere
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-
-	//do the handshake
-	n, err := rw.Write(handshakeMsg.Marshall())
-	errCheck(err)
-	err = rw.Flush()
-	errCheck(err)
-	resp := [68]byte{} // we probably need to parse this and save the id and make sure its a legit connection
-	n, err = rw.Read(resp[:])
-	spew.Dump(n, resp)
-
-	// start receiving messages
-	for {
-		msg, err := readMessage(rw)
-		errCheck(err)
-		if err != nil {
-			break
-		}
-		spew.Dump(msg)
-	}
-	// responsd to messages as they come in
+	go torrent.readLoop(rw)
+	torrent.handleMessages()
 }
