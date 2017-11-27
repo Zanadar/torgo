@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"crypto/sha1"
-	"encoding/binary"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +23,7 @@ type TorrentInfo struct {
 	Encoding string
 	Info
 	InfoHash [20]byte
+	logger   log.Logger
 }
 type Info struct {
 	Name        string
@@ -59,12 +58,16 @@ type Torrent struct {
 	InfoHash []byte
 	Peers    []Peer
 	TrackerResponse
+	peerConns map[Peer]bufio.ReadWriter
+	msgs      chan message
 }
 
-type message struct {
-	length  int
-	kind    int
-	payload []byte
+func (t *Torrent) readLoop() {
+	// read shit from clients
+}
+
+func (t *Torrent) writeLoop() {
+	// send shit to clients
 }
 
 func errCheck(err error) {
@@ -94,7 +97,50 @@ func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, erro
 	return torrentInfo, err
 }
 
-func callTracker(ti TorrentInfo, logger log.Logger) (Torrent, error) {
+func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
+	url, err := url.Parse(ti.Announce)
+	errCheck(err)
+	id := [20]byte{} // This is important!  The ID must be 20 bytes long
+	copy(id[:], "boblog123")
+
+	q := url.Query()
+	q.Add("info_hash", string(ti.InfoHash[:]))
+	q.Add("peer_id", string(id[:]))
+	q.Add("left", strconv.Itoa(int(ti.Info.Length)))
+	url.RawQuery = q.Encode()
+
+	resp, err := http.Get(url.String())
+	errCheck(err)
+	defer resp.Body.Close()
+
+	trackerResp := &TrackerResponse{}
+	err = bencode.Unmarshal(resp.Body, trackerResp)
+	errCheck(err)
+	level.Debug(ti.logger).Log("response", spew.Sdump(trackerResp))
+
+	peers := []Peer{}
+	var ip []interface{}
+	for i := 0; i < len(trackerResp.Peers); i += 6 {
+		peerBytes := []byte(trackerResp.Peers[i : i+6])
+		ip = []interface{}{
+			peerBytes[0],
+			peerBytes[1],
+			peerBytes[2],
+			peerBytes[3],
+		}
+		port := int(peerBytes[4])*256 + int(peerBytes[5])
+		peers = append(peers, Peer{
+			ID:   i, //TODO don't do this so that we can save the actual ID?
+			IP:   fmt.Sprintf("%d.%d.%d.%d", ip...),
+			Port: port,
+		})
+	}
+	level.Debug(ti.logger).Log("peers", spew.Sdump(peers))
+
+	return trackerResp, nil
+}
+
+func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 	url, err := url.Parse(ti.Announce)
 	errCheck(err)
 	id := [20]byte{} // This is important!  The ID must be 20 bytes long
@@ -127,18 +173,20 @@ func callTracker(ti TorrentInfo, logger log.Logger) (Torrent, error) {
 		}
 		port := int(peerBytes[4])*256 + int(peerBytes[5])
 		peers = append(peers, Peer{
-			ID:   i,
+			ID:   i, //TODO don't do this so that we can save the actual ID?
 			IP:   fmt.Sprintf("%d.%d.%d.%d", ip...),
 			Port: port,
 		})
 	}
 	level.Debug(logger).Log("peers", spew.Sdump(peers))
 
-	torrent := Torrent{
+	torrent := &Torrent{
 		TrackerResponse: *trackerResp,
 		InfoHash:        ti.InfoHash[:],
 		PeerId:          id[:],
 		Peers:           peers,
+		peerConns:       make(map[Peer]bufio.ReadWriter),
+		msgs:            make(chan message),
 	}
 
 	return torrent, err
@@ -169,28 +217,30 @@ func main() {
 	torrentInfo, err := parseTorrent(torrentBuf, log.With(logger, "parseTorrent"))
 	errCheck(err)
 
-	torrent, err := callTracker(*torrentInfo, log.With(logger, "trackerResponse"))
+	torrent, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
 	errCheck(err)
 
 	handshakeMsg := NewHandshake(torrent, logger)
 	level.Debug(logger).Log("torrent", spew.Sdump(torrent))
 	errCheck(err)
 
+	// DialPeer this should be in a goroutine?
 	conn, err := net.Dial("tcp", torrent.Peers[1].String())
 	defer conn.Close()
 	errCheck(err)
+	// save this somewhere
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
+	//do the handshake
 	n, err := rw.Write(handshakeMsg.Marshall())
 	errCheck(err)
 	err = rw.Flush()
 	errCheck(err)
-	resp := [68]byte{}
+	resp := [68]byte{} // we probably need to parse this and save the id and make sure its a legit connection
 	n, err = rw.Read(resp[:])
 	spew.Dump(n, resp)
 
-	// byteString := strings.NewReader("\x00\x00\x00\x0b\x05\xdf\xef\xdf\x77\xfb\xff\xff\xff\xff\xee\x00\x00\x00\x05\x04\x00\x00\x00\x02\x00\x00\x00\x05\x04\x00\x00\x00\x0b\x00\x00\x00\x05\x04\x00\x00\x00\x12\x00\x00\x00\x05\x04\x00\x00\x00\x18\x00\x00\x00\x05\x04\x00\x00\x00\x1c\x00\x00\x00\x05\x04\x00\x00\x00\x25\x00\x00\x00\x05\x04\x00\x00\x00\x4b")
-
+	// start receiving messages
 	for {
 		msg, err := readMessage(rw)
 		errCheck(err)
@@ -199,33 +249,5 @@ func main() {
 		}
 		spew.Dump(msg)
 	}
-}
-
-func readMessage(r *bufio.ReadWriter) (message, error) {
-	msg := message{}
-	LEN_HEADER := 4
-	// Read first four bytes as an int -> LENGTH
-	lenBytes := make([]byte, LEN_HEADER, LEN_HEADER)
-	n, err := r.Read(lenBytes[:LEN_HEADER])
-	errCheck(err)
-	if n != LEN_HEADER {
-		return msg, errors.New("problem with the length")
-	}
-
-	mlen := binary.BigEndian.Uint32(lenBytes)
-	msg.length = int(mlen)
-
-	mkind, err := r.ReadByte()
-	errCheck(err)
-	msg.kind = int(mkind)
-
-	payload := make([]byte, mlen-1, mlen-1)
-	n, err = r.Read(payload)
-	// if n != int(mlen) {
-	// 	return msg, fmt.Errorf("problem with the payload %d", n)
-	// }
-
-	msg.payload = payload
-
-	return msg, nil
+	// responsd to messages as they come in
 }
