@@ -23,7 +23,7 @@ type Handshake struct {
 }
 
 type message struct {
-	source  Peer
+	source  string
 	length  int
 	kind    int
 	payload []byte

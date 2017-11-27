@@ -46,10 +46,11 @@ type TrackerResponse struct {
 }
 
 type Peer struct {
-	ID   int `bencode:"peer id"`
-	IP   string
-	Port int
-	conn *bufio.ReadWriter
+	ID      string
+	IP      string
+	Port    int
+	conn    *bufio.ReadWriter
+	message chan message
 }
 
 func (p Peer) String() string {
@@ -60,7 +61,7 @@ type Torrent struct {
 	ti TorrentInfo
 	TrackerResponse
 	Handshake
-	peerConns map[Peer]bufio.ReadWriter
+	peerConns map[string]chan message
 	msgs      chan message
 	errChan   chan error
 }
@@ -78,6 +79,9 @@ func (t *Torrent) connectPeer(p *Peer) {
 	errCheck(err)
 	r := io.Reader(rw)
 	reply, err := Unmarshal(r)
+	p.ID = string(reply.PeerId[:])
+	t.peerConns[p.ID] = make(chan message)
+
 	errCheck(err)
 	spew.Dump("resp", n, reply)
 	p.readLoop(t.msgs, t.errChan)
@@ -87,6 +91,7 @@ func (p *Peer) readLoop(msgs chan message, errs chan error) {
 	// start receiving messages
 	for {
 		msg, err := readMessage(p.conn)
+		msg.source = p.ID
 		errCheck(err)
 		if err != nil {
 			errs <- err
@@ -172,7 +177,6 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 		}
 		port := int(peerBytes[4])*256 + int(peerBytes[5])
 		peers = append(peers, Peer{
-			ID:   i, //TODO don't do this so that we can save the actual ID?
 			IP:   fmt.Sprintf("%d.%d.%d.%d", ip...),
 			Port: port,
 		})
@@ -201,9 +205,9 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		TrackerResponse: *trackerResp,
 		Handshake:       h,
 		ti:              ti,
-		peerConns:       make(map[Peer]bufio.ReadWriter),
 		msgs:            make(chan message),
 		errChan:         make(chan error),
+		peerConns:       make(map[string]chan message),
 	}
 
 	return torrent, err
