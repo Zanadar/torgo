@@ -4,8 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
-
-	"github.com/davecgh/go-spew/spew"
+	"io"
 )
 
 const (
@@ -16,24 +15,32 @@ const (
 var reserved = [8]byte{}
 
 type Handshake struct {
-	InfoHash []byte
-	PeerId   []byte
+	_        [1]byte  // pstrlen
+	_        [19]byte // pstr
+	_        [8]byte  //reserved
+	InfoHash [20]byte
+	PeerId   [20]byte
 }
 
 type message struct {
+	source  Peer
 	length  int
 	kind    int
 	payload []byte
+}
+
+func Unmarshal(r io.Reader) (*Handshake, error) {
+	h := &Handshake{}
+	err := binary.Read(r, binary.BigEndian, h)
+	return h, err
 }
 
 func (h Handshake) Marshall() []byte {
 	handShake := []byte{byte(19)}
 	handShake = append(handShake, []byte(pstr)...)
 	handShake = append(handShake, reserved[:]...) // Make array to slice
-	handShake = append(handShake, []byte(h.InfoHash)...)
-	handShake = append(handShake, []byte(h.PeerId)...)
-
-	spew.Dump(handShake)
+	handShake = append(handShake, []byte(h.InfoHash[:])...)
+	handShake = append(handShake, []byte(h.PeerId[:])...)
 
 	return handShake
 }
@@ -58,6 +65,7 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 
 	payload := make([]byte, mlen-1, mlen-1)
 	n, err = r.Read(payload)
+	errCheck(err)
 
 	msg.payload = payload
 

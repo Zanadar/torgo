@@ -49,6 +49,7 @@ type Peer struct {
 	ID   int `bencode:"peer id"`
 	IP   string
 	Port int
+	conn *bufio.ReadWriter
 }
 
 func (p Peer) String() string {
@@ -61,25 +62,37 @@ type Torrent struct {
 	Handshake
 	peerConns map[Peer]bufio.ReadWriter
 	msgs      chan message
+	errChan   chan error
 }
 
-func (t *Torrent) readLoop(rw *bufio.ReadWriter) {
-	n, err := rw.Write(t.Handshake.Marshall())
+func (t *Torrent) connectPeer(p *Peer) {
+	conn, err := net.Dial("tcp", p.String())
+	defer conn.Close()
+	errCheck(err)
+	// save this somewhere
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	p.conn = rw
+	n, err := p.conn.Write(t.Handshake.Marshall())
 	errCheck(err)
 	err = rw.Flush()
 	errCheck(err)
-	resp := [68]byte{} // we probably need to parse this and save the id and make sure its a legit connection
-	n, err = rw.Read(resp[:])
-	spew.Dump(n, resp)
+	r := io.Reader(rw)
+	reply, err := Unmarshal(r)
+	errCheck(err)
+	spew.Dump("resp", n, reply)
+	p.readLoop(t.msgs, t.errChan)
+}
 
+func (p *Peer) readLoop(msgs chan message, errs chan error) {
 	// start receiving messages
 	for {
-		msg, err := readMessage(rw)
+		msg, err := readMessage(p.conn)
 		errCheck(err)
 		if err != nil {
+			errs <- err
 			break
 		}
-		t.msgs <- msg
+		msgs <- msg
 	}
 }
 
@@ -93,7 +106,6 @@ func (t *Torrent) handleMessages() {
 		select {
 		case msg := <-t.msgs:
 			spew.Dump(msg)
-			spew.Dump("heya!")
 		}
 	}
 }
@@ -177,19 +189,21 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		return nil, err
 	}
 
-	handshake := Handshake{
-		InfoHash: ti.InfoHash,
-		PeerId:   ti.PeerId,
-	}
+	h := Handshake{}
+	h.InfoHash = [20]byte{}
+	h.PeerId = [20]byte{}
+	copy(h.InfoHash[:], ti.InfoHash)
+	copy(h.PeerId[:], ti.PeerId)
 
 	level.Debug(logger).Log("handshake", ti.InfoHash)
 
 	torrent := &Torrent{
 		TrackerResponse: *trackerResp,
-		Handshake:       handshake,
+		Handshake:       h,
 		ti:              ti,
 		peerConns:       make(map[Peer]bufio.ReadWriter),
 		msgs:            make(chan message),
+		errChan:         make(chan error),
 	}
 
 	return torrent, err
@@ -220,18 +234,21 @@ func main() {
 	torrentInfo, err := parseTorrent(torrentBuf, log.With(logger, "parseTorrent"))
 	errCheck(err)
 
-	torrent, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
+	t, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
 	errCheck(err)
 
 	errCheck(err)
-	spew.Dump(torrent.PeerList)
+	spew.Dump(t.PeerList)
 
 	// DialPeer this should be in a goroutine?
-	conn, err := net.Dial("tcp", torrent.PeerList[1].String())
-	defer conn.Close()
-	errCheck(err)
-	// save this somewhere
-	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	go torrent.readLoop(rw)
-	torrent.handleMessages()
+	p := t.PeerList[1]
+	go t.connectPeer(&p)
+	for {
+		select {
+		case msg := <-t.msgs:
+			spew.Dump(msg)
+		case err := <-t.errChan:
+			errCheck(err)
+		}
+	}
 }
