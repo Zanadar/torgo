@@ -18,14 +18,6 @@ import (
 	"github.com/jackpal/bencode-go"
 )
 
-type TorrentInfo struct {
-	Announce string
-	Encoding string
-	Info
-	InfoHash []byte
-	PeerId   []byte // Our id that we send to the clients
-	logger   log.Logger
-}
 type Info struct {
 	Name        string
 	Pieces      string
@@ -43,106 +35,6 @@ type TrackerResponse struct {
 	Complete       int
 	incomplete     int
 	Peers          string
-}
-
-type Peer struct {
-	ID      string
-	IP      string
-	Port    int
-	conn    *bufio.ReadWriter
-	message chan message
-}
-
-func (p Peer) String() string {
-	return fmt.Sprintf("%s:%d", p.IP, p.Port)
-}
-
-type Torrent struct {
-	ti TorrentInfo
-	TrackerResponse
-	Handshake
-	peerConns map[string]chan message
-	msgs      chan message
-	errChan   chan error
-}
-
-func (t *Torrent) connectPeer(p *Peer) {
-	conn, err := net.Dial("tcp", p.String())
-	defer conn.Close()
-	errCheck(err)
-	// save this somewhere
-	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	p.conn = rw
-	n, err := p.conn.Write(t.Handshake.Marshall())
-	errCheck(err)
-	err = rw.Flush()
-	errCheck(err)
-	r := io.Reader(rw)
-	reply, err := Unmarshal(r)
-	p.ID = string(reply.PeerId[:])
-	t.peerConns[p.ID] = make(chan message)
-
-	errCheck(err)
-	spew.Dump("resp", n, reply)
-	p.readLoop(t.msgs, t.errChan)
-}
-
-func (p *Peer) readLoop(msgs chan message, errs chan error) {
-	// start receiving messages
-	for {
-		msg, err := readMessage(p.conn)
-		msg.source = p.ID
-		errCheck(err)
-		if err != nil {
-			errs <- err
-			break
-		}
-		msgs <- msg
-	}
-}
-
-func (t *Torrent) writeLoop() {
-	// send shit to clients
-}
-
-// handle messages sent on the chan
-func (t *Torrent) handleMessages() {
-	for {
-		select {
-		case msg := <-t.msgs:
-			spew.Dump(msg)
-		}
-	}
-}
-
-func errCheck(err error) {
-	if err != nil {
-		fmt.Printf("Problem: %e", err)
-	}
-}
-
-func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, error) {
-	torrentParts, err := bencode.Decode(torrentF)
-	errCheck(err)
-
-	t := torrentParts.(map[string]interface{})
-	info := t["info"].(map[string]interface{})
-	infoHash := sha1.New()
-	err = bencode.Marshal(infoHash, info)
-	errCheck(err)
-	// This is correct per: https://allenkim67.github.io/programming/2016/05/04/how-to-make-your-own-bittorrent-client.html#info-hash
-	// <Buffer 11 7e 3a 66 65 e8 ff 1b 15 7e 5e c3 78 23 57 8a db 8a 71 2b>
-
-	torrentInfo := &TorrentInfo{}
-	id := [20]byte{} // This is important!  The ID must be 20 bytes long
-	copy(id[:], "boblog123")
-	torrentInfo.PeerId = id[:]
-	torrentF.Seek(0, 0) // rewind
-	err = bencode.Unmarshal(torrentF, torrentInfo)
-	errCheck(err)
-	torrentInfo.InfoHash = infoHash.Sum(nil) // copy the hash into a full slice of the array
-
-	return torrentInfo, err
 }
 
 func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
@@ -187,6 +79,48 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 	return trackerResp, nil
 }
 
+func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, error) {
+	torrentParts, err := bencode.Decode(torrentF)
+	errCheck(err)
+
+	t := torrentParts.(map[string]interface{})
+	info := t["info"].(map[string]interface{})
+	infoHash := sha1.New()
+	err = bencode.Marshal(infoHash, info)
+	errCheck(err)
+	// This is correct per: https://allenkim67.github.io/programming/2016/05/04/how-to-make-your-own-bittorrent-client.html#info-hash
+	// <Buffer 11 7e 3a 66 65 e8 ff 1b 15 7e 5e c3 78 23 57 8a db 8a 71 2b>
+
+	torrentInfo := &TorrentInfo{}
+	id := [20]byte{} // This is important!  The ID must be 20 bytes long
+	copy(id[:], "boblog123")
+	torrentInfo.PeerId = id[:]
+	torrentF.Seek(0, 0) // rewind
+	err = bencode.Unmarshal(torrentF, torrentInfo)
+	errCheck(err)
+	torrentInfo.InfoHash = infoHash.Sum(nil) // copy the hash into a full slice of the array
+
+	return torrentInfo, err
+}
+
+type TorrentInfo struct {
+	Announce string
+	Encoding string
+	Info
+	InfoHash []byte
+	PeerId   []byte // Our id that we send to the clients
+	logger   log.Logger
+}
+
+type Torrent struct {
+	ti TorrentInfo
+	TrackerResponse
+	Handshake
+	peerConns map[string]chan struct{}
+	msgs      chan message
+	errChan   chan error
+}
+
 func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 	trackerResp, err := ti.callTracker()
 	if err != nil {
@@ -207,10 +141,80 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		ti:              ti,
 		msgs:            make(chan message),
 		errChan:         make(chan error),
-		peerConns:       make(map[string]chan message),
+		peerConns:       make(map[string]chan struct{}),
 	}
 
 	return torrent, err
+}
+
+func (t *Torrent) writeLoop() {
+	// send shit to clients
+}
+
+// handle messages sent on the chan
+func (t *Torrent) handleMessages() {
+	for {
+		select {
+		case msg := <-t.msgs:
+			spew.Dump(msg)
+		}
+	}
+}
+
+func (t *Torrent) connectPeer(p *Peer) {
+	conn, err := net.Dial("tcp", p.String())
+	defer conn.Close()
+	errCheck(err)
+	// save this somewhere
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	p.conn = rw
+	n, err := p.conn.Write(t.Handshake.Marshall())
+	errCheck(err)
+	err = rw.Flush()
+	errCheck(err)
+	r := io.Reader(rw)
+	reply, err := Unmarshal(r)
+	p.ID = string(reply.PeerId[:])
+	t.peerConns[p.ID] = make(chan struct{})
+
+	errCheck(err)
+	spew.Dump("resp", n, reply)
+	p.readLoop(t.msgs, t.errChan)
+}
+
+type Peer struct {
+	ID      string
+	IP      string
+	Port    int
+	conn    *bufio.ReadWriter
+	message chan message
+}
+
+func (p Peer) String() string {
+	return fmt.Sprintf("%s:%d", p.IP, p.Port)
+}
+
+func (p *Peer) readLoop(msgs chan message, errs chan error) {
+	// start receiving messages
+	for {
+		msg, err := readMessage(p.conn)
+		msg.source = p.ID
+		errCheck(err)
+		if err != nil {
+			errs <- err
+			break
+		}
+		msgs <- msg
+	}
+}
+
+func (p *Peer) writeMsgs(msgs chan struct{}) {
+}
+
+func errCheck(err error) {
+	if err != nil {
+		fmt.Printf("Problem: %e", err)
+	}
 }
 
 func main() {
