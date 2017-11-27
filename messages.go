@@ -42,11 +42,11 @@ func (h Handshake) Marshall() []byte {
 
 func NewHandshake(t *Torrent, logger log.Logger) Handshake {
 	handshake := Handshake{
-		InfoHash: t.InfoHash,
-		PeerId:   t.PeerId,
+		InfoHash: t.ti.InfoHash,
+		PeerId:   t.ti.PeerId,
 	}
 
-	level.Debug(logger).Log("handshake", t.InfoHash)
+	level.Debug(logger).Log("handshake", t.ti.InfoHash)
 
 	return handshake
 }
