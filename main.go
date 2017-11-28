@@ -165,6 +165,7 @@ func (t *Torrent) connectPeer(p *Peer) {
 	r := io.Reader(rw)
 	reply, err := Unmarshal(r)
 	p.ID = string(reply.PeerId[:])
+	//TODO verify that InfoHash returned matches the one we have
 	t.peerConns[p.ID] = make(chan struct{})
 
 	errCheck(err)
@@ -246,13 +247,13 @@ func main() {
 	spew.Dump(t.PeerList)
 
 	// DialPeer this should be in a goroutine?
-	p := t.PeerList[2]
+	p := t.PeerList[1]
 	go t.connectPeer(&p)
 	for {
 		select {
 		case msg := <-t.msgs:
 			t.peerConns[msg.source] <- struct{}{}
-			spew.Dump(msg)
+			spew.Dump("message", msg)
 		case err := <-t.errChan:
 			errCheck(err)
 		}

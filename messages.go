@@ -1,3 +1,4 @@
+//go:generate stringer -type=msgID
 package main
 
 import (
@@ -7,6 +8,20 @@ import (
 	"io"
 )
 
+type msgID int
+
+const (
+	KPALIVE msgID = iota - 1
+	CHOKE
+	UNCHOKE
+	INTERST
+	UNINTERST
+	HAVE
+	BITFLD
+	REQ
+	PIECE
+	CNCL // we can give these payload methods that know how to parse their payload
+)
 const (
 	pstrlen = 19
 	pstr    = "BitTorrent protocol"
@@ -25,7 +40,7 @@ type Handshake struct {
 type message struct {
 	source  string
 	length  int
-	kind    int
+	kind    msgID
 	payload []byte
 }
 
@@ -61,7 +76,7 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 
 	mkind, err := r.ReadByte()
 	errCheck(err)
-	msg.kind = int(mkind)
+	msg.kind = msgID(mkind)
 
 	payload := make([]byte, mlen-1, mlen-1)
 	n, err = r.Read(payload)
