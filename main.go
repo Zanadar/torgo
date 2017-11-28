@@ -151,16 +151,6 @@ func (t *Torrent) writeLoop() {
 	// send shit to clients
 }
 
-// handle messages sent on the chan
-func (t *Torrent) handleMessages() {
-	for {
-		select {
-		case msg := <-t.msgs:
-			spew.Dump(msg)
-		}
-	}
-}
-
 func (t *Torrent) connectPeer(p *Peer) {
 	conn, err := net.Dial("tcp", p.String())
 	defer conn.Close()
@@ -179,6 +169,7 @@ func (t *Torrent) connectPeer(p *Peer) {
 
 	errCheck(err)
 	spew.Dump("resp", n, reply)
+	go p.writeMsgs(t.peerConns[p.ID])
 	p.readLoop(t.msgs, t.errChan)
 }
 
@@ -209,6 +200,12 @@ func (p *Peer) readLoop(msgs chan message, errs chan error) {
 }
 
 func (p *Peer) writeMsgs(msgs chan struct{}) {
+	for {
+		select {
+		case <-msgs:
+			spew.Dump("ping")
+		}
+	}
 }
 
 func errCheck(err error) {
@@ -249,14 +246,17 @@ func main() {
 	spew.Dump(t.PeerList)
 
 	// DialPeer this should be in a goroutine?
-	p := t.PeerList[1]
+	p := t.PeerList[2]
 	go t.connectPeer(&p)
 	for {
 		select {
 		case msg := <-t.msgs:
+			t.peerConns[msg.source] <- struct{}{}
 			spew.Dump(msg)
 		case err := <-t.errChan:
 			errCheck(err)
 		}
 	}
+	//TODO at this point, we can take the message from the peers and start to do things with them.
+	// use IOTA to give them meaningful names, and then change the state of the torrent based on some kind of logic?
 }
