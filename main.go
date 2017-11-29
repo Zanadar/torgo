@@ -207,12 +207,14 @@ func newPieceLog(length int) PieceLog {
 }
 func (p *PieceLog) Log(id string, pieces []byte) error {
 	WS := Arch()
-	for _, b := range pieces {
-		for i := 0; i < 8; i++ {
-			shift := uint(i % WS)
+	for i, b := range pieces {
+		spew.Dump(i, b)
+		baseIndex := i * 8
+		for j := 0; j < 8; j++ {
+			shift := uint(j % WS)
 			on := (b & (1 << shift)) != 0
 			if on {
-				p.vector[i][id] = struct{}{}
+				p.vector[baseIndex+j][id] = struct{}{}
 			}
 		}
 	}

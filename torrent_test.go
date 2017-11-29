@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,7 @@ func Test_handleBitfieldMsg(t *testing.T) {
 		expected string
 	}{
 		{"4 pieces", []byte("\x06"), "boblog123", "01100000"},
+		{"more pieces", []byte("\x06\xff"), "boblog123", "0110000011111111"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,16 +43,25 @@ func Test_handleBitfieldMsg(t *testing.T) {
 }
 
 func Test_PieceLogString(t *testing.T) {
-	pieces := []byte("\x06")
-	pieceLog := newPieceLog(len(pieces) * 8)
-	err := pieceLog.Log("boblog123", pieces)
-	if err != nil {
-		t.Error(err)
+	cases := []struct {
+		id       string
+		pieces   []byte
+		expected string
+	}{
+		{"boblog123", []byte("\x06"), "01100000"},
+		{"boblog123", []byte("\x06\xff"), "0110000011111111"},
 	}
 
-	res := pieceLog.String()
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("Test: %s", tc.expected), func(t *testing.T) {
+			pieceLog := newPieceLog(len(tc.pieces) * 8)
+			pieceLog.Log(tc.id, tc.pieces)
 
-	if res != "01100000" {
-		t.Errorf("got '%s'; expected '%s'", res, "01100000")
+			res := pieceLog.String()
+
+			if res != tc.expected {
+				t.Errorf("got '%s'; expected '%s'", res, tc.expected)
+			}
+		})
 	}
 }
