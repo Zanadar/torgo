@@ -72,7 +72,7 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 	}
 
 	mlen := binary.BigEndian.Uint32(lenBytes)
-	msg.length = int(mlen)
+	msg.length = int(mlen) // handle the special case of a keepalive
 
 	mkind, err := r.ReadByte()
 	errCheck(err)

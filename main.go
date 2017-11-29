@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,13 @@ import (
 	"github.com/go-kit/kit/log/level"
 	"github.com/jackpal/bencode-go"
 )
+
+func Arch() int {
+	if build.Default.GOARCH == "amd64" {
+		return 64
+	}
+	return 32
+}
 
 type Info struct {
 	Name        string
@@ -95,7 +103,8 @@ func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, erro
 	id := [20]byte{} // This is important!  The ID must be 20 bytes long
 	copy(id[:], "boblog123")
 	torrentInfo.PeerId = id[:]
-	torrentF.Seek(0, 0) // rewind
+	_, err = torrentF.Seek(0, 0) // rewind
+	errCheck(err)
 	err = bencode.Unmarshal(torrentF, torrentInfo)
 	errCheck(err)
 	torrentInfo.InfoHash = infoHash.Sum(nil) // copy the hash into a full slice of the array
@@ -119,6 +128,8 @@ type Torrent struct {
 	peerConns map[string]chan struct{}
 	msgs      chan message
 	errChan   chan error
+	PieceLog
+	// That would allow us to do rarest first requests?
 }
 
 func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
@@ -142,13 +153,20 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		msgs:            make(chan message),
 		errChan:         make(chan error),
 		peerConns:       make(map[string]chan struct{}),
+		PieceLog:        newPieceLog(len(ti.Pieces) / 20),
 	}
+
+	//this should start the torrent loop and return the torrent
 
 	return torrent, err
 }
 
 func (t *Torrent) writeLoop() {
 	// send shit to clients
+}
+
+func (t *Torrent) handleBitfield(msg message) {
+	t.PieceLog.Log(msg.source, msg.payload)
 }
 
 func (t *Torrent) connectPeer(p *Peer) {
@@ -172,14 +190,58 @@ func (t *Torrent) connectPeer(p *Peer) {
 	spew.Dump("resp", n, reply)
 	go p.writeMsgs(t.peerConns[p.ID])
 	p.readLoop(t.msgs, t.errChan)
+
+	//this should start the peer loop and return the peer
+}
+
+type PieceLog struct {
+	vector []map[string]struct{}
+}
+
+func newPieceLog(length int) PieceLog {
+	vec := make([]map[string]struct{}, length)
+	for i := range vec {
+		vec[i] = make(map[string]struct{})
+	}
+	return PieceLog{vec}
+}
+func (p *PieceLog) Log(id string, pieces []byte) error {
+	WS := Arch()
+	for _, b := range pieces {
+		for i := 0; i < 8; i++ {
+			shift := uint(i % WS)
+			on := (b & (1 << shift)) != 0
+			if on {
+				p.vector[i][id] = struct{}{}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (p *PieceLog) String() (filled string) {
+	var has int
+	for _, piece := range p.vector {
+		if len(piece) > 0 {
+			has = 1
+		} else {
+			has = 0
+		}
+		filled = fmt.Sprintf("%s%b", filled, has)
+	}
+
+	return filled
 }
 
 type Peer struct {
-	ID      string
-	IP      string
-	Port    int
-	conn    *bufio.ReadWriter
-	message chan message
+	ID         string
+	IP         string
+	Port       int
+	conn       *bufio.ReadWriter
+	message    chan message
+	choked     bool
+	interested bool
 }
 
 func (p Peer) String() string {
@@ -204,7 +266,6 @@ func (p *Peer) writeMsgs(msgs chan struct{}) {
 	for {
 		select {
 		case <-msgs:
-			spew.Dump("ping")
 		}
 	}
 }
@@ -260,4 +321,21 @@ func main() {
 	}
 	//TODO at this point, we can take the message from the peers and start to do things with them.
 	// use IOTA to give them meaningful names, and then change the state of the torrent based on some kind of logic?
+	/* we're getting BITFLD and HAVE messages from peers, so we need to track their state:
+		        This starts as: i
+		        {
+		          INTERST: 0
+		          CHOKE: 1
+		        }
+
+			   1. Choked
+			   2. which pieces they have
+			   3. which pieces they want
+
+		           Then we send them an INTERST message and receive an UNCHOKE
+	                   If we receive and INTERST msg we can respond with a UNCHOKE to indicate we will serve files
+	                   After a peer is UNCHOKEd we can send requests
+
+	*/
+
 }
