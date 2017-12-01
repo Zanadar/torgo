@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha1"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"go/build"
@@ -166,7 +167,16 @@ func (t *Torrent) writeLoop() {
 }
 
 func (t *Torrent) handleBitfield(msg message) {
-	t.PieceLog.Log(msg.source, msg.payload)
+	t.Log(msg.source, msg.payload)
+}
+
+func (t *Torrent) handleHave(msg message) {
+	// turn the index into a bitfield payload
+	i := binary.BigEndian.Uint32(msg.payload) - 1
+	slot := (1 << i) // flip a bit at the ith spot
+	buf := make([]byte, 8)
+	binary.PutUvarint(buf, uint64(slot))
+	t.Log(msg.source, buf)
 }
 
 func (t *Torrent) connectPeer(p *Peer) {
@@ -208,7 +218,6 @@ func newPieceLog(length int) PieceLog {
 func (p *PieceLog) Log(id string, pieces []byte) error {
 	WS := Arch()
 	for i, b := range pieces {
-		spew.Dump(i, b)
 		baseIndex := i * 8
 		for j := 0; j < 8; j++ {
 			shift := uint(j % WS)
@@ -315,6 +324,11 @@ func main() {
 	for {
 		select {
 		case msg := <-t.msgs:
+			switch {
+			case msg.kind == BITFLD:
+				t.handleBitfield(msg)
+				// Send INTERST to peer
+			}
 			t.peerConns[msg.source] <- struct{}{}
 			spew.Dump("message", msg)
 		case err := <-t.errChan:

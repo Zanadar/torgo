@@ -6,6 +6,41 @@ import (
 	"testing"
 )
 
+func Test_handleHaveMsg(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		source   string
+		expected string
+	}{
+		{"6th piece", []byte("\x00\x00\x00\x06"), "boblog123", "00000100"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tor := &Torrent{
+				PieceLog: newPieceLog(32),
+			}
+			msg := message{
+				source:  tc.source,
+				kind:    HAVE,
+				payload: tc.payload,
+			}
+			tor.handleHave(msg)
+			res := tor.PieceLog.String()
+			if res[:8] != tc.expected {
+				t.Fatalf("got %s; want %s to be stored", res, tc.expected)
+			}
+
+			first := strings.Index(res, "1")
+			_, ok := tor.PieceLog.vector[first][tc.source]
+			if !ok {
+				t.Fatalf("got %s; not stored at %s", tor.PieceLog.vector, ok)
+			}
+		})
+	}
+
+}
+
 func Test_handleBitfieldMsg(t *testing.T) {
 	cases := []struct {
 		name     string
