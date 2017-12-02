@@ -154,7 +154,7 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		msgs:            make(chan message),
 		errChan:         make(chan error),
 		peerConns:       make(map[string]chan struct{}),
-		PieceLog:        newPieceLog(len(ti.Pieces) / 20),
+		PieceLog:        newPieceLog(200),
 	}
 
 	//this should start the torrent loop and return the torrent
@@ -167,16 +167,13 @@ func (t *Torrent) writeLoop() {
 }
 
 func (t *Torrent) handleBitfield(msg message) {
-	t.Log(msg.source, msg.payload)
+	t.LogField(msg.source, msg.payload)
 }
 
 func (t *Torrent) handleHave(msg message) {
 	// turn the index into a bitfield payload
-	i := binary.BigEndian.Uint32(msg.payload) - 1
-	slot := (1 << i) // flip a bit at the ith spot
-	buf := make([]byte, 8)
-	binary.PutUvarint(buf, uint64(slot))
-	t.Log(msg.source, buf)
+	i := binary.BigEndian.Uint32(msg.payload)
+	t.LogSingle(msg.source, int(i))
 }
 
 func (t *Torrent) connectPeer(p *Peer) {
@@ -215,20 +212,25 @@ func newPieceLog(length int) PieceLog {
 	}
 	return PieceLog{vec}
 }
-func (p *PieceLog) Log(id string, pieces []byte) error {
-	WS := Arch()
-	for i, b := range pieces {
-		baseIndex := i * 8
-		for j := 0; j < 8; j++ {
-			shift := uint(j % WS)
-			on := (b & (1 << shift)) != 0
-			if on {
-				p.vector[baseIndex+j][id] = struct{}{}
-			}
+func (p *PieceLog) LogField(id string, pieces []byte) error {
+	bitString := ""
+	for _, b := range pieces {
+		bit := strconv.FormatUint(uint64(b), 2)
+		bitString = fmt.Sprintf("%s%s", bitString, bit)
+	}
+	fmt.Printf("bitString: %b", bitString)
+	for i, bit := range bitString {
+		fmt.Printf("i %d\n", i)
+		if bit == '1' {
+			p.LogSingle(id, i)
 		}
 	}
-
 	return nil
+}
+
+func (p *PieceLog) LogSingle(id string, piece int) {
+	fmt.Printf("Called: %d\n", piece)
+	p.vector[piece][id] = struct{}{}
 }
 
 func (p *PieceLog) String() (filled string) {
@@ -328,9 +330,12 @@ func main() {
 			case msg.kind == BITFLD:
 				t.handleBitfield(msg)
 				// Send INTERST to peer
+			case msg.kind == HAVE:
+				t.handleHave(msg)
 			}
 			t.peerConns[msg.source] <- struct{}{}
-			spew.Dump("message", msg)
+			spew.Dump(msg)
+			/* spew.Dump(t) */
 		case err := <-t.errChan:
 			errCheck(err)
 		}

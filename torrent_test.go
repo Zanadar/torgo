@@ -13,7 +13,7 @@ func Test_handleHaveMsg(t *testing.T) {
 		source   string
 		expected string
 	}{
-		{"6th piece", []byte("\x00\x00\x00\x06"), "boblog123", "00000100"},
+		{"7th piece", []byte("\x00\x00\x00\x06"), "boblog123", "00000010"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,7 +38,6 @@ func Test_handleHaveMsg(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func Test_handleBitfieldMsg(t *testing.T) {
@@ -50,6 +49,7 @@ func Test_handleBitfieldMsg(t *testing.T) {
 	}{
 		{"4 pieces", []byte("\x06"), "boblog123", "01100000"},
 		{"more pieces", []byte("\x06\xff"), "boblog123", "0110000011111111"},
+		{"and more pieces", []byte("\xfe\xff"), "boblog123", "1111111011111111"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,7 +74,6 @@ func Test_handleBitfieldMsg(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func Test_PieceLogString(t *testing.T) {
@@ -85,12 +84,13 @@ func Test_PieceLogString(t *testing.T) {
 	}{
 		{"boblog123", []byte("\x06"), "01100000"},
 		{"boblog123", []byte("\x06\xff"), "0110000011111111"},
+		{"boblog123", []byte("\xfe\xff"), "1111111011111111"},
 	}
 
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("Test: %s", tc.expected), func(t *testing.T) {
 			pieceLog := newPieceLog(len(tc.pieces) * 8)
-			pieceLog.Log(tc.id, tc.pieces)
+			pieceLog.LogField(tc.id, tc.pieces)
 
 			res := pieceLog.String()
 
