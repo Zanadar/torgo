@@ -215,12 +215,9 @@ func newPieceLog(length int) PieceLog {
 func (p *PieceLog) LogField(id string, pieces []byte) error {
 	bitString := ""
 	for _, b := range pieces {
-		bit := strconv.FormatUint(uint64(b), 2)
-		bitString = fmt.Sprintf("%s%s", bitString, bit)
+		bitString = fmt.Sprintf("%s%.8b", bitString, b) // prints 1111111111111101
 	}
-	fmt.Printf("bitString: %b", bitString)
 	for i, bit := range bitString {
-		fmt.Printf("i %d\n", i)
 		if bit == '1' {
 			p.LogSingle(id, i)
 		}
@@ -229,7 +226,6 @@ func (p *PieceLog) LogField(id string, pieces []byte) error {
 }
 
 func (p *PieceLog) LogSingle(id string, piece int) {
-	fmt.Printf("Called: %d\n", piece)
 	p.vector[piece][id] = struct{}{}
 }
 

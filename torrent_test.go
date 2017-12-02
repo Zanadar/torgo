@@ -82,8 +82,8 @@ func Test_PieceLogString(t *testing.T) {
 		pieces   []byte
 		expected string
 	}{
-		{"boblog123", []byte("\x06"), "01100000"},
-		{"boblog123", []byte("\x06\xff"), "0110000011111111"},
+		{"boblog123", []byte("\x06"), "00000110"},
+		{"boblog123", []byte("\x06\xff"), "0000011011111111"},
 		{"boblog123", []byte("\xfe\xff"), "1111111011111111"},
 	}
 
