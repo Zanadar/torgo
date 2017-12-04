@@ -6,26 +6,21 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"go/build"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/jackpal/bencode-go"
 )
-
-func Arch() int {
-	if build.Default.GOARCH == "amd64" {
-		return 64
-	}
-	return 32
-}
 
 type Info struct {
 	Name        string
@@ -128,7 +123,7 @@ type Torrent struct {
 	Handshake
 	peerConns map[string]chan struct{}
 	msgs      chan message
-	errChan   chan error
+	quitCh    chan os.Signal
 	PieceLog
 	// That would allow us to do rarest first requests?
 }
@@ -152,7 +147,7 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		Handshake:       h,
 		ti:              ti,
 		msgs:            make(chan message),
-		errChan:         make(chan error),
+		quitCh:          make(chan os.Signal, 1),
 		peerConns:       make(map[string]chan struct{}),
 		PieceLog:        newPieceLog(200),
 	}
@@ -176,10 +171,25 @@ func (t *Torrent) handleHave(msg message) {
 	t.LogSingle(msg.source, int(i))
 }
 
+func (t *Torrent) handleShutdown() {
+	var wg sync.WaitGroup
+	close := func(conn chan struct{}) {
+		conn <- struct{}{}
+		<-conn
+		wg.Done()
+	}
+	wg.Add(len(t.peerConns))
+	for _, peer := range t.peerConns {
+		go close(peer)
+	}
+	wg.Wait()
+
+}
+
 func (t *Torrent) connectPeer(p *Peer) {
 	conn, err := net.Dial("tcp", p.String())
-	defer conn.Close()
 	errCheck(err)
+	defer conn.Close()
 	// save this somewhere
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	p.conn = rw
@@ -195,8 +205,9 @@ func (t *Torrent) connectPeer(p *Peer) {
 
 	errCheck(err)
 	spew.Dump("resp", n, reply)
-	go p.writeMsgs(t.peerConns[p.ID])
-	p.readLoop(t.msgs, t.errChan)
+	go p.parseMsgs(t.msgs)
+	p.readLoop(t.peerConns[p.ID])
+	fmt.Printf("Peer %s done", p.ID)
 
 	//this should start the peer loop and return the peer
 }
@@ -248,7 +259,6 @@ type Peer struct {
 	IP         string
 	Port       int
 	conn       *bufio.ReadWriter
-	message    chan message
 	choked     bool
 	interested bool
 }
@@ -257,25 +267,21 @@ func (p Peer) String() string {
 	return fmt.Sprintf("%s:%d", p.IP, p.Port)
 }
 
-func (p *Peer) readLoop(msgs chan message, errs chan error) {
-	// start receiving messages
+func (p *Peer) readLoop(shutdown chan struct{}) {
+	<-shutdown
+	fmt.Println("Shutting down peer")
+	close(shutdown)
+}
+
+func (p *Peer) parseMsgs(msgs chan message) {
 	for {
 		msg, err := readMessage(p.conn)
 		msg.source = p.ID
 		errCheck(err)
 		if err != nil {
-			errs <- err
 			break
 		}
 		msgs <- msg
-	}
-}
-
-func (p *Peer) writeMsgs(msgs chan struct{}) {
-	for {
-		select {
-		case <-msgs:
-		}
 	}
 }
 
@@ -311,13 +317,15 @@ func main() {
 	errCheck(err)
 
 	t, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
+	signal.Notify(t.quitCh, os.Interrupt)
 	errCheck(err)
 
 	errCheck(err)
 	spew.Dump(t.PeerList)
 
 	// DialPeer this should be in a goroutine?
-	p := t.PeerList[1]
+	p := t.PeerList[2]
+	ticker := time.NewTicker(time.Second * 1)
 	go t.connectPeer(&p)
 	for {
 		select {
@@ -329,12 +337,17 @@ func main() {
 			case msg.kind == HAVE:
 				t.handleHave(msg)
 			}
-			t.peerConns[msg.source] <- struct{}{}
 			spew.Dump(msg)
 			/* spew.Dump(t) */
-		case err := <-t.errChan:
-			errCheck(err)
+		case sig := <-t.quitCh:
+			fmt.Println("Shutdown received")
+			spew.Dump(sig)
+			t.handleShutdown()
+			return
+		case <-ticker.C:
+			fmt.Printf("Tick")
 		}
+		spew.Dump(t)
 	}
 	//TODO at this point, we can take the message from the peers and start to do things with them.
 	// use IOTA to give them meaningful names, and then change the state of the torrent based on some kind of logic?
