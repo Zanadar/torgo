@@ -47,8 +47,8 @@ func Test_handleBitfieldMsg(t *testing.T) {
 		source   string
 		expected string
 	}{
-		{"4 pieces", []byte("\x06"), "boblog123", "01100000"},
-		{"more pieces", []byte("\x06\xff"), "boblog123", "0110000011111111"},
+		{"4 pieces", []byte("\x06"), "boblog123", "00000110"},
+		{"more pieces", []byte("\x06\xff"), "boblog123", "0000011011111111"},
 		{"and more pieces", []byte("\xfe\xff"), "boblog123", "1111111011111111"},
 	}
 	for _, tc := range cases {
