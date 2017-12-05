@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-kit/kit/log"
@@ -73,8 +72,10 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 		}
 		port := int(peerBytes[4])*256 + int(peerBytes[5])
 		peers = append(peers, Peer{
-			IP:   fmt.Sprintf("%d.%d.%d.%d", ip...),
-			Port: port,
+			IP:       fmt.Sprintf("%d.%d.%d.%d", ip...),
+			Port:     port,
+			shutdown: make(chan struct{}),
+			messages: make(chan message),
 		})
 	}
 	trackerResp.PeerList = peers
@@ -121,10 +122,11 @@ type Torrent struct {
 	ti TorrentInfo
 	TrackerResponse
 	Handshake
-	peerConns map[string]chan struct{}
-	msgs      chan message
-	quitCh    chan os.Signal
+	msgs   chan message
+	quitCh chan os.Signal
 	PieceLog
+	peerLock  sync.Mutex
+	peerConns map[string]*Peer
 	// That would allow us to do rarest first requests?
 }
 
@@ -148,9 +150,10 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		ti:              ti,
 		msgs:            make(chan message),
 		quitCh:          make(chan os.Signal, 1),
-		peerConns:       make(map[string]chan struct{}),
+		peerConns:       make(map[string]*Peer),
 		PieceLog:        newPieceLog(200),
 	}
+	torrent.peerLock.Lock()
 
 	//this should start the torrent loop and return the torrent
 
@@ -173,43 +176,21 @@ func (t *Torrent) handleHave(msg message) {
 
 func (t *Torrent) handleShutdown() {
 	var wg sync.WaitGroup
-	close := func(conn chan struct{}) {
-		conn <- struct{}{}
-		<-conn
+	shutdown := func(p *Peer) {
+		p.shutdown <- struct{}{}
+		<-p.shutdown
 		wg.Done()
 	}
 	wg.Add(len(t.peerConns))
 	for _, peer := range t.peerConns {
-		go close(peer)
+		go shutdown(peer)
 	}
 	wg.Wait()
-
 }
 
-func (t *Torrent) connectPeer(p *Peer) {
-	conn, err := net.Dial("tcp", p.String())
-	errCheck(err)
-	defer conn.Close()
-	// save this somewhere
-	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	p.conn = rw
-	n, err := p.conn.Write(t.Handshake.Marshall())
-	errCheck(err)
-	err = rw.Flush()
-	errCheck(err)
-	r := io.Reader(rw)
-	reply, err := Unmarshal(r)
-	p.ID = string(reply.PeerId[:])
-	//TODO verify that InfoHash returned matches the one we have
-	t.peerConns[p.ID] = make(chan struct{})
-
-	errCheck(err)
-	spew.Dump("resp", n, reply)
-	go p.parseMsgs(t.msgs)
-	p.readLoop(t.peerConns[p.ID])
-	fmt.Printf("Peer %s done", p.ID)
-
-	//this should start the peer loop and return the peer
+func (t *Torrent) sendInterest(msg message) {
+	p := t.peerConns[msg.source]
+	p.messages <- message{length: 1, kind: INTERST}
 }
 
 type PieceLog struct {
@@ -261,16 +242,50 @@ type Peer struct {
 	conn       *bufio.ReadWriter
 	choked     bool
 	interested bool
+	shutdown   chan struct{}
+	messages   chan message
 }
 
 func (p Peer) String() string {
 	return fmt.Sprintf("%s:%d", p.IP, p.Port)
 }
 
-func (p *Peer) readLoop(shutdown chan struct{}) {
-	<-shutdown
-	fmt.Println("Shutting down peer")
-	close(shutdown)
+func (p *Peer) connect(hs Handshake, msgs chan message) {
+	conn, err := net.Dial("tcp", p.String())
+	errCheck(err)
+	defer conn.Close()
+	// save this somewhere
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	p.conn = rw
+	n, err := p.conn.Write(hs.Marshall())
+	errCheck(err)
+	err = rw.Flush()
+	errCheck(err)
+	r := io.Reader(rw)
+	reply, err := Unmarshal(r)
+	p.ID = string(reply.PeerId[:])
+	//TODO verify that InfoHash returned matches the one we have
+
+	errCheck(err)
+	spew.Dump("resp", n, reply)
+	go p.parseMsgs(msgs)
+	go p.readLoop()
+	fmt.Printf("Peer %s done", p.ID)
+
+	//this should start the peer loop and return the peer
+}
+
+func (p *Peer) readLoop() {
+	for {
+		select {
+		case <-p.shutdown:
+			fmt.Printf("Shutting down peer: %s\n", p.ID)
+			close(p.shutdown)
+			return
+		case msg := <-p.messages:
+			p.send(msg)
+		}
+	}
 }
 
 func (p *Peer) parseMsgs(msgs chan message) {
@@ -279,10 +294,20 @@ func (p *Peer) parseMsgs(msgs chan message) {
 		msg.source = p.ID
 		errCheck(err)
 		if err != nil {
+			// maybe we should make a reconnect mssage here?
+			fmt.Printf("Issue parsing:%e\n", err)
 			break
 		}
 		msgs <- msg
 	}
+}
+
+func (p *Peer) send(msg message) {
+	binary.Write(p.conn, binary.BigEndian, uint32(msg.length))
+	binary.Write(p.conn, binary.BigEndian, msg.kind)
+	binary.Write(p.conn, binary.BigEndian, msg.payload)
+	spew.Dump(p.conn.Writer.Buffered())
+	p.conn.Flush()
 }
 
 func errCheck(err error) {
@@ -324,15 +349,18 @@ func main() {
 	spew.Dump(t.PeerList)
 
 	// DialPeer this should be in a goroutine?
-	p := t.PeerList[2]
-	ticker := time.NewTicker(time.Second * 1)
-	go t.connectPeer(&p)
+	p := t.PeerList[1]
+	p.connect(t.Handshake, t.msgs)
+	t.peerLock.Unlock()
+	t.peerConns[p.ID] = &p
+	t.peerLock.Lock()
 	for {
 		select {
 		case msg := <-t.msgs:
 			switch {
 			case msg.kind == BITFLD:
 				t.handleBitfield(msg)
+				t.sendInterest(msg)
 				// Send INTERST to peer
 			case msg.kind == HAVE:
 				t.handleHave(msg)
@@ -344,8 +372,6 @@ func main() {
 			spew.Dump(sig)
 			t.handleShutdown()
 			return
-		case <-ticker.C:
-			fmt.Printf("Tick")
 		}
 		spew.Dump(t)
 	}

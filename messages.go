@@ -66,7 +66,9 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 
 	lenBytes := make([]byte, LEN_HEADER, LEN_HEADER)
 	n, err := r.Read(lenBytes[:LEN_HEADER])
-	errCheck(err)
+	if err != nil {
+		return message{}, err
+	}
 	if n != LEN_HEADER {
 		return msg, errors.New("problem with the length")
 	}
