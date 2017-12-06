@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -42,6 +43,15 @@ type message struct {
 	length  int
 	kind    msgID
 	payload []byte
+}
+
+func (m message) Unmarshal() []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint32(m.length))
+	binary.Write(&buf, binary.BigEndian, uint8(m.kind))
+	binary.Write(&buf, binary.BigEndian, m.payload)
+
+	return buf.Bytes()
 }
 
 func Unmarshal(r io.Reader) (*Handshake, error) {

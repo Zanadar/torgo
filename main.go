@@ -29,7 +29,7 @@ type Info struct {
 }
 
 type TrackerResponse struct {
-	PeerList       []Peer
+	PeerList       []ConnPeer
 	FailureReason  string `bencode:"failure reason"`
 	WarningMessage string `bencode:"warning message"`
 	Interval       int
@@ -49,7 +49,6 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 	q.Add("peer_id", string(ti.PeerId[:]))
 	q.Add("left", strconv.Itoa(int(ti.Info.Length)))
 	url.RawQuery = q.Encode()
-	spew.Dump(url)
 
 	resp, err := http.Get(url.String())
 	errCheck(err)
@@ -60,23 +59,21 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 	errCheck(err)
 	/* level.Debug(ti.logger).Log("response", spew.Sdump(trackerResp)) */
 
-	peers := []Peer{}
+	peers := []ConnPeer{}
 	var ip []interface{}
 	for i := 0; i < len(trackerResp.Peers); i += 6 {
 		peerBytes := []byte(trackerResp.Peers[i : i+6])
-		ip = []interface{}{
-			peerBytes[0],
-			peerBytes[1],
-			peerBytes[2],
-			peerBytes[3],
+		{
+			ip = []interface{}{
+				peerBytes[0],
+				peerBytes[1],
+				peerBytes[2],
+				peerBytes[3],
+			}
+			ipString := fmt.Sprintf("%d.%d.%d.%d", ip...)
+			port := int(peerBytes[4])*256 + int(peerBytes[5])
+			peers = append(peers, newPeer(ipString, port))
 		}
-		port := int(peerBytes[4])*256 + int(peerBytes[5])
-		peers = append(peers, Peer{
-			IP:       fmt.Sprintf("%d.%d.%d.%d", ip...),
-			Port:     port,
-			shutdown: make(chan struct{}),
-			messages: make(chan message),
-		})
 	}
 	trackerResp.PeerList = peers
 	/* level.Debug(ti.logger).Log("peers", spew.Sdump(peers)) */
@@ -126,7 +123,7 @@ type Torrent struct {
 	quitCh chan os.Signal
 	PieceLog
 	peerLock  sync.Mutex
-	peerConns map[string]*Peer
+	peerConns map[string]ConnPeer
 	// That would allow us to do rarest first requests?
 }
 
@@ -150,7 +147,7 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		ti:              ti,
 		msgs:            make(chan message),
 		quitCh:          make(chan os.Signal, 1),
-		peerConns:       make(map[string]*Peer),
+		peerConns:       make(map[string]ConnPeer),
 		PieceLog:        newPieceLog(200),
 	}
 	torrent.peerLock.Lock()
@@ -174,6 +171,16 @@ func (t *Torrent) handleHave(msg message) {
 	t.LogSingle(msg.source, int(i))
 }
 
+func (t *Torrent) handleUnchoke(msg message) {
+	t.unchoke(msg.source)
+}
+
+func (t *Torrent) unchoke(id string) {
+	t.peerLock.Unlock()
+	defer t.peerLock.Lock()
+	t.peerConns[id].PeerChoking(false)
+}
+
 func (t *Torrent) handleShutdown() {
 	var wg sync.WaitGroup
 	shutdown := func(p *Peer) {
@@ -183,14 +190,24 @@ func (t *Torrent) handleShutdown() {
 	}
 	wg.Add(len(t.peerConns))
 	for _, peer := range t.peerConns {
-		go shutdown(peer)
+		go shutdown(peer.(*Peer))
 	}
 	wg.Wait()
 }
 
 func (t *Torrent) sendInterest(msg message) {
+	t.peerLock.Unlock()
+	defer t.peerLock.Lock()
 	p := t.peerConns[msg.source]
-	p.messages <- message{length: 1, kind: INTERST}
+	p.Message(message{length: 1, kind: INTERST})
+}
+
+func (t *Torrent) sendRequest(msg message) {
+	t.peerLock.Unlock()
+	defer t.peerLock.Lock()
+	p := t.peerConns[msg.source]
+	p.Message(message{length: 1, kind: INTERST})
+
 }
 
 type PieceLog struct {
@@ -235,42 +252,88 @@ func (p *PieceLog) String() (filled string) {
 	return filled
 }
 
+type ConnPeer interface {
+	Message(message)
+	Connect(Handshake, chan message)
+	ParseMsgs(chan message)
+	AmChoking(bool)
+	AmInterested(bool)
+	PeerChoking(bool)
+	PeerInterested(bool)
+	ID() string
+}
+
 type Peer struct {
-	ID         string
-	IP         string
-	Port       int
-	conn       *bufio.ReadWriter
-	choked     bool
-	interested bool
-	shutdown   chan struct{}
-	messages   chan message
+	id              string
+	IP              string
+	Port            int
+	rw              *bufio.ReadWriter
+	conn            net.Conn
+	am_choking      bool
+	peer_choking    bool
+	peer_interested bool
+	am_interested   bool
+	shutdown        chan struct{}
+	messages        chan message
+}
+
+func newPeer(IP string, Port int) *Peer {
+	return &Peer{
+		IP:              IP,
+		Port:            Port,
+		am_choking:      true,
+		am_interested:   false,
+		peer_choking:    true,
+		peer_interested: false,
+		shutdown:        make(chan struct{}),
+		messages:        make(chan message),
+	}
 }
 
 func (p Peer) String() string {
 	return fmt.Sprintf("%s:%d", p.IP, p.Port)
 }
 
-func (p *Peer) connect(hs Handshake, msgs chan message) {
+func (p Peer) ID() string {
+	return p.id
+}
+
+func (p *Peer) AmChoking(choke bool) {
+	p.am_choking = choke
+}
+
+func (p *Peer) AmInterested(interest bool) {
+	p.am_interested = interest
+}
+
+func (p *Peer) PeerInterested(interest bool) {
+	p.peer_interested = interest
+}
+
+func (p *Peer) PeerChoking(choke bool) {
+	p.peer_choking = choke
+}
+
+func (p *Peer) Connect(hs Handshake, msgs chan message) {
 	conn, err := net.Dial("tcp", p.String())
 	errCheck(err)
-	defer conn.Close()
+	p.conn = conn
 	// save this somewhere
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-	p.conn = rw
-	n, err := p.conn.Write(hs.Marshall())
+	p.rw = rw
+	_, err = p.conn.Write(hs.Marshall())
 	errCheck(err)
 	err = rw.Flush()
 	errCheck(err)
 	r := io.Reader(rw)
 	reply, err := Unmarshal(r)
-	p.ID = string(reply.PeerId[:])
+	p.id = string(reply.PeerId[:])
 	//TODO verify that InfoHash returned matches the one we have
 
 	errCheck(err)
-	spew.Dump("resp", n, reply)
-	go p.parseMsgs(msgs)
+	go p.ParseMsgs(msgs)
 	go p.readLoop()
-	fmt.Printf("Peer %s done", p.ID)
+	fmt.Printf("Peer %s setup done\n", p.ID)
 
 	//this should start the peer loop and return the peer
 }
@@ -280,6 +343,7 @@ func (p *Peer) readLoop() {
 		select {
 		case <-p.shutdown:
 			fmt.Printf("Shutting down peer: %s\n", p.ID)
+			p.conn.Close()
 			close(p.shutdown)
 			return
 		case msg := <-p.messages:
@@ -288,10 +352,10 @@ func (p *Peer) readLoop() {
 	}
 }
 
-func (p *Peer) parseMsgs(msgs chan message) {
+func (p *Peer) ParseMsgs(msgs chan message) {
 	for {
-		msg, err := readMessage(p.conn)
-		msg.source = p.ID
+		msg, err := readMessage(p.rw)
+		msg.source = p.ID()
 		errCheck(err)
 		if err != nil {
 			// maybe we should make a reconnect mssage here?
@@ -302,12 +366,13 @@ func (p *Peer) parseMsgs(msgs chan message) {
 	}
 }
 
+func (p *Peer) Message(msg message) {
+	p.messages <- msg
+}
+
 func (p *Peer) send(msg message) {
-	binary.Write(p.conn, binary.BigEndian, uint32(msg.length))
-	binary.Write(p.conn, binary.BigEndian, msg.kind)
-	binary.Write(p.conn, binary.BigEndian, msg.payload)
-	spew.Dump(p.conn.Writer.Buffered())
-	p.conn.Flush()
+	p.rw.Write(msg.Unmarshal())
+	p.rw.Flush()
 }
 
 func errCheck(err error) {
@@ -345,14 +410,12 @@ func main() {
 	signal.Notify(t.quitCh, os.Interrupt)
 	errCheck(err)
 
-	errCheck(err)
-	spew.Dump(t.PeerList)
-
 	// DialPeer this should be in a goroutine?
+	spew.Dump(t.PeerList)
 	p := t.PeerList[1]
-	p.connect(t.Handshake, t.msgs)
+	p.Connect(t.Handshake, t.msgs)
 	t.peerLock.Unlock()
-	t.peerConns[p.ID] = &p
+	t.peerConns[p.ID()] = p
 	t.peerLock.Lock()
 	for {
 		select {
@@ -364,17 +427,20 @@ func main() {
 				// Send INTERST to peer
 			case msg.kind == HAVE:
 				t.handleHave(msg)
+				t.sendInterest(msg)
+			case msg.kind == UNCHOKE:
+				t.handleUnchoke(msg)
+				t.sendRequest(msg)
+			default:
+				spew.Dump(msg)
 			}
-			spew.Dump(msg)
-			/* spew.Dump(t) */
-		case sig := <-t.quitCh:
+		case <-t.quitCh:
 			fmt.Println("Shutdown received")
-			spew.Dump(sig)
 			t.handleShutdown()
 			return
 		}
-		spew.Dump(t)
 	}
+	spew.Dump(t)
 	//TODO at this point, we can take the message from the peers and start to do things with them.
 	// use IOTA to give them meaningful names, and then change the state of the torrent based on some kind of logic?
 	/* we're getting BITFLD and HAVE messages from peers, so we need to track their state:

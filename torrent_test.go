@@ -100,3 +100,30 @@ func Test_PieceLogString(t *testing.T) {
 		})
 	}
 }
+
+func Test_sendInterst(t *testing.T) {
+	cases := []struct {
+		id       string
+		expected string
+	}{
+		{"boblog123", []byte("\x06"), "00000110"},
+		{"boblog123", []byte("\x06\xff"), "0000011011111111"},
+		{"boblog123", []byte("\xfe\xff"), "1111111011111111"},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("Test: %s", tc.expected), func(t *testing.T) {
+
+			tor := &Torrent{
+				PieceLog: newPieceLog(32),
+			}
+			msg := message{
+				source:  tc.source,
+				kind:    HAVE,
+				payload: tc.payload,
+			}
+			tor.handleHave(msg)
+		})
+	}
+
+}
