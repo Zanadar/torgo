@@ -24,8 +24,26 @@ import (
 type Info struct {
 	Name        string
 	Pieces      string
+	pieceStore  Pieces
 	Length      int64
 	PieceLength int64 `bencode:"piece length"`
+}
+
+type Pieces struct {
+	data string
+}
+
+func (i *Pieces) String() [][]byte {
+	pieces := []byte(i.data)
+	var hashes [][]byte
+	var hash []byte
+
+	for i := 0; i < len(pieces); i += 20 {
+		hash = pieces[i : i+20]
+		hashes = append(hashes, hash)
+	}
+
+	return hashes
 }
 
 type TrackerResponse struct {
@@ -40,7 +58,7 @@ type TrackerResponse struct {
 	Peers          string
 }
 
-func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
+func (ti *TorrentInfo) callTracker(logger log.Logger) (*TrackerResponse, error) {
 	url, err := url.Parse(ti.Announce)
 	errCheck(err)
 
@@ -57,7 +75,7 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 	trackerResp := &TrackerResponse{}
 	err = bencode.Unmarshal(resp.Body, trackerResp)
 	errCheck(err)
-	/* level.Debug(ti.logger).Log("response", spew.Sdump(trackerResp)) */
+	level.Debug(ti.logger).Log("response", spew.Sdump(trackerResp))
 
 	peers := []ConnPeer{}
 	var ip []interface{}
@@ -72,11 +90,11 @@ func (ti *TorrentInfo) callTracker() (*TrackerResponse, error) {
 			}
 			ipString := fmt.Sprintf("%d.%d.%d.%d", ip...)
 			port := int(peerBytes[4])*256 + int(peerBytes[5])
-			peers = append(peers, newPeer(ipString, port))
+			peers = append(peers, newPeer(ipString, port, log.With(logger, "Peer", ipString)))
 		}
 	}
 	trackerResp.PeerList = peers
-	/* level.Debug(ti.logger).Log("peers", spew.Sdump(peers)) */
+	level.Debug(ti.logger).Log("peers", spew.Sdump(peers))
 
 	return trackerResp, nil
 }
@@ -93,7 +111,9 @@ func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, erro
 	// This is correct per: https://allenkim67.github.io/programming/2016/05/04/how-to-make-your-own-bittorrent-client.html#info-hash
 	// <Buffer 11 7e 3a 66 65 e8 ff 1b 15 7e 5e c3 78 23 57 8a db 8a 71 2b>
 
-	torrentInfo := &TorrentInfo{}
+	torrentInfo := &TorrentInfo{
+		logger: logger,
+	}
 	id := [20]byte{} // This is important!  The ID must be 20 bytes long
 	copy(id[:], "boblog123")
 	torrentInfo.PeerId = id[:]
@@ -102,6 +122,7 @@ func parseTorrent(torrentF io.ReadSeeker, logger log.Logger) (*TorrentInfo, erro
 	err = bencode.Unmarshal(torrentF, torrentInfo)
 	errCheck(err)
 	torrentInfo.InfoHash = infoHash.Sum(nil) // copy the hash into a full slice of the array
+	torrentInfo.pieceStore.data = torrentInfo.Pieces
 
 	return torrentInfo, err
 }
@@ -119,16 +140,19 @@ type Torrent struct {
 	ti TorrentInfo
 	TrackerResponse
 	Handshake
-	msgs   chan message
-	quitCh chan os.Signal
-	PieceLog
-	peerLock  sync.Mutex
-	peerConns map[string]ConnPeer
-	// That would allow us to do rarest first requests?
+	msgs              chan message
+	quitCh            chan os.Signal
+	PeerPieceLog      PieceLog
+	RequestedPieceLog PieceLog
+	WriteLog          []bool
+	Piecer            Piecer
+	peerLock          sync.Mutex
+	peerConns         map[string]ConnPeer
+	logger            log.Logger
 }
 
 func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
-	trackerResp, err := ti.callTracker()
+	trackerResp, err := ti.callTracker(logger)
 	if err != nil {
 		return nil, err
 	}
@@ -141,14 +165,20 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 
 	level.Debug(logger).Log("handshake", ti.InfoHash)
 
+	pieceCount := int(ti.Length/ti.PieceLength) + 1 // this is a hack but so what if we over allocate...
+
 	torrent := &Torrent{
-		TrackerResponse: *trackerResp,
-		Handshake:       h,
-		ti:              ti,
-		msgs:            make(chan message),
-		quitCh:          make(chan os.Signal, 1),
-		peerConns:       make(map[string]ConnPeer),
-		PieceLog:        newPieceLog(200),
+		TrackerResponse:   *trackerResp,
+		Handshake:         h,
+		ti:                ti,
+		msgs:              make(chan message),
+		quitCh:            make(chan os.Signal, 1),
+		peerConns:         make(map[string]ConnPeer),
+		PeerPieceLog:      newPieceLog(pieceCount),
+		RequestedPieceLog: newPieceLog(pieceCount),
+		WriteLog:          make([]bool, pieceCount),
+		logger:            logger,
+		Piecer:            newPiecerFS(p),
 	}
 	torrent.peerLock.Lock()
 
@@ -162,13 +192,13 @@ func (t *Torrent) writeLoop() {
 }
 
 func (t *Torrent) handleBitfield(msg message) {
-	t.LogField(msg.source, msg.payload)
+	t.PeerPieceLog.LogField(msg.source, msg.payload)
 }
 
 func (t *Torrent) handleHave(msg message) {
 	// turn the index into a bitfield payload
 	i := binary.BigEndian.Uint32(msg.payload)
-	t.LogSingle(msg.source, int(i))
+	t.PeerPieceLog.LogSingle(msg.source, int(i))
 }
 
 func (t *Torrent) handleUnchoke(msg message) {
@@ -178,7 +208,9 @@ func (t *Torrent) handleUnchoke(msg message) {
 func (t *Torrent) unchoke(id string) {
 	t.peerLock.Unlock()
 	defer t.peerLock.Lock()
-	t.peerConns[id].PeerChoking(false)
+	p := t.peerConns[id]
+	p.PeerChoking(false)
+	level.Debug(t.logger).Log("peerUchoke", p.state())
 }
 
 func (t *Torrent) handleShutdown() {
@@ -199,15 +231,54 @@ func (t *Torrent) sendInterest(msg message) {
 	t.peerLock.Unlock()
 	defer t.peerLock.Lock()
 	p := t.peerConns[msg.source]
+	p.AmInterested(true)
 	p.Message(message{length: 1, kind: INTERST})
+	level.Debug(t.logger).Log("interest", p.state())
 }
 
 func (t *Torrent) sendRequest(msg message) {
+	// Check for pieces we don't have
+	// Check for pieces we haven't requested
+	// Check for pieces that peers have
+	// Request the rarest of those pieces first
+	// Record the request in the log
 	t.peerLock.Unlock()
 	defer t.peerLock.Lock()
 	p := t.peerConns[msg.source]
-	p.Message(message{length: 1, kind: INTERST})
+	level.Debug(t.logger).Log("request", p)
+}
 
+type Piecer interface {
+	Write(int, int, []byte) error
+}
+
+type PiecerFS struct {
+	file      *os.File
+	path      string
+	blockSize int
+}
+
+func newPiecerFS(path string, pieceCount int, blockSize int) (Piecer, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &PiecerFS{
+		file:       f,
+		path:       path,
+		blockSize:  blockSize,
+		pieceCount: pieceCount,
+	}, nil
+}
+
+func (p *PiecerFS) Write(index int, begin int, data []byte) error {
+	offset := p.calcOffset(index, begin)
+	_, err := p.file.WriteAt(data, offset)
+	return err
+}
+
+func (p *PiecerFS) calcOffset(index, begin int) int64 {
+	return int64((index * p.blockSize) + begin)
 }
 
 type PieceLog struct {
@@ -240,8 +311,8 @@ func (p *PieceLog) LogSingle(id string, piece int) {
 
 func (p *PieceLog) String() (filled string) {
 	var has int
-	for _, piece := range p.vector {
-		if len(piece) > 0 {
+	for _, piece := range p.Logged() {
+		if piece {
 			has = 1
 		} else {
 			has = 0
@@ -252,6 +323,17 @@ func (p *PieceLog) String() (filled string) {
 	return filled
 }
 
+func (p *PieceLog) Logged() []bool {
+	var have []bool
+	for i, piece := range p.vector {
+		if len(piece) > 0 {
+			have[i] = true
+		}
+	}
+
+	return have
+}
+
 type ConnPeer interface {
 	Message(message)
 	Connect(Handshake, chan message)
@@ -260,6 +342,7 @@ type ConnPeer interface {
 	AmInterested(bool)
 	PeerChoking(bool)
 	PeerInterested(bool)
+	state() string
 	ID() string
 }
 
@@ -275,9 +358,10 @@ type Peer struct {
 	am_interested   bool
 	shutdown        chan struct{}
 	messages        chan message
+	logger          log.Logger
 }
 
-func newPeer(IP string, Port int) *Peer {
+func newPeer(IP string, Port int, logger log.Logger) *Peer {
 	return &Peer{
 		IP:              IP,
 		Port:            Port,
@@ -287,11 +371,13 @@ func newPeer(IP string, Port int) *Peer {
 		peer_interested: false,
 		shutdown:        make(chan struct{}),
 		messages:        make(chan message),
+		logger:          logger,
 	}
 }
 
 func (p Peer) String() string {
-	return fmt.Sprintf("%s:%d", p.IP, p.Port)
+	pString := fmt.Sprintf("%s:%d", p.IP, p.Port)
+	return pString
 }
 
 func (p Peer) ID() string {
@@ -333,7 +419,7 @@ func (p *Peer) Connect(hs Handshake, msgs chan message) {
 	errCheck(err)
 	go p.ParseMsgs(msgs)
 	go p.readLoop()
-	fmt.Printf("Peer %s setup done\n", p.ID)
+	level.Debug(p.logger).Log("connected", p.state())
 
 	//this should start the peer loop and return the peer
 }
@@ -342,7 +428,7 @@ func (p *Peer) readLoop() {
 	for {
 		select {
 		case <-p.shutdown:
-			fmt.Printf("Shutting down peer: %s\n", p.ID)
+			fmt.Printf("Shutting down peer: %s\n", p.ID())
 			p.conn.Close()
 			close(p.shutdown)
 			return
@@ -368,6 +454,10 @@ func (p *Peer) ParseMsgs(msgs chan message) {
 
 func (p *Peer) Message(msg message) {
 	p.messages <- msg
+}
+
+func (p *Peer) state() string {
+	return fmt.Sprintf("Peer:\n %+#v", p)
 }
 
 func (p *Peer) send(msg message) {
@@ -403,15 +493,15 @@ func main() {
 	torrentBuf, err := os.Open(args[0])
 	errCheck(err)
 
-	torrentInfo, err := parseTorrent(torrentBuf, log.With(logger, "parseTorrent"))
+	ti, err := parseTorrent(torrentBuf, log.With(logger, "piece", "torrentInfo"))
 	errCheck(err)
 
-	t, err := newTorrent(*torrentInfo, log.With(logger, "trackerResponse"))
+	t, err := newTorrent(*ti, log.With(logger, "piece", "Torrent"))
 	signal.Notify(t.quitCh, os.Interrupt)
 	errCheck(err)
 
 	// DialPeer this should be in a goroutine?
-	spew.Dump(t.PeerList)
+	level.Debug(logger).Log("PeerList", spew.Sdump(t.PeerList))
 	p := t.PeerList[1]
 	p.Connect(t.Handshake, t.msgs)
 	t.peerLock.Unlock()
@@ -432,7 +522,7 @@ func main() {
 				t.handleUnchoke(msg)
 				t.sendRequest(msg)
 			default:
-				spew.Dump(msg)
+				level.Debug(logger).Log("msg", spew.Sdump(msg))
 			}
 		case <-t.quitCh:
 			fmt.Println("Shutdown received")

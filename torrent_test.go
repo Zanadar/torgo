@@ -18,7 +18,7 @@ func Test_handleHaveMsg(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tor := &Torrent{
-				PieceLog: newPieceLog(32),
+				PeerPieceLog: newPieceLog(32),
 			}
 			msg := message{
 				source:  tc.source,
@@ -26,15 +26,15 @@ func Test_handleHaveMsg(t *testing.T) {
 				payload: tc.payload,
 			}
 			tor.handleHave(msg)
-			res := tor.PieceLog.String()
+			res := tor.PeerPieceLog.String()
 			if res[:8] != tc.expected {
 				t.Fatalf("got %s; want %s to be stored", res, tc.expected)
 			}
 
 			first := strings.Index(res, "1")
-			_, ok := tor.PieceLog.vector[first][tc.source]
+			_, ok := tor.PeerPieceLog.vector[first][tc.source]
 			if !ok {
-				t.Fatalf("got %s; not stored at %s", tor.PieceLog.vector, ok)
+				t.Fatalf("got %s; not stored at %s", tor.PeerPieceLog.vector, ok)
 			}
 		})
 	}
@@ -54,7 +54,7 @@ func Test_handleBitfieldMsg(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tor := &Torrent{
-				PieceLog: newPieceLog(len(tc.payload) * 8),
+				PeerPieceLog: newPieceLog(len(tc.payload) * 8),
 			}
 			msg := message{
 				source:  tc.source,
@@ -68,9 +68,9 @@ func Test_handleBitfieldMsg(t *testing.T) {
 			}
 
 			first := strings.Index(res, "1")
-			_, ok := tor.PieceLog.vector[first][tc.source]
+			_, ok := tor.PeerPieceLog.vector[first][tc.source]
 			if !ok {
-				t.Fatalf("got %s; not stored at %s", tor.PieceLog.vector, ok)
+				t.Fatalf("got %s; not stored at %s", tor.PeerPieceLog.vector, ok)
 			}
 		})
 	}
@@ -106,8 +106,7 @@ func Test_sendInterst(t *testing.T) {
 		id       string
 		expected string
 	}{
-		{"boblog123", []byte("\x06"), "00000110"},
-		{"boblog123", []byte("\x06\xff"), "0000011011111111"},
+		{"boblog123", []byte("\x06"), "00000110"}, {"boblog123", []byte("\x06\xff"), "0000011011111111"},
 		{"boblog123", []byte("\xfe\xff"), "1111111011111111"},
 	}
 
