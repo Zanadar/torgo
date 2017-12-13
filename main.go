@@ -21,6 +21,10 @@ import (
 	"github.com/jackpal/bencode-go"
 )
 
+const (
+	DL_FILE = "./Downloads/"
+)
+
 type Info struct {
 	Name        string
 	Pieces      string
@@ -142,13 +146,14 @@ type Torrent struct {
 	Handshake
 	msgs              chan message
 	quitCh            chan os.Signal
+	errChan           chan error
 	PeerPieceLog      PieceLog
 	RequestedPieceLog PieceLog
 	WriteLog          []bool
 	Piecer            Piecer
-	peerLock          sync.Mutex
-	peerConns         map[string]ConnPeer
-	logger            log.Logger
+	sync.Mutex
+	peerConns map[string]ConnPeer
+	logger    log.Logger
 }
 
 func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
@@ -166,6 +171,7 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 	level.Debug(logger).Log("handshake", ti.InfoHash)
 
 	pieceCount := int(ti.Length/ti.PieceLength) + 1 // this is a hack but so what if we over allocate...
+	piecer, err := newPiecerFS(ti.Name, pieceCount, int(ti.PieceLength))
 
 	torrent := &Torrent{
 		TrackerResponse:   *trackerResp,
@@ -173,14 +179,14 @@ func newTorrent(ti TorrentInfo, logger log.Logger) (*Torrent, error) {
 		ti:                ti,
 		msgs:              make(chan message),
 		quitCh:            make(chan os.Signal, 1),
+		errChan:           make(chan error, 1),
 		peerConns:         make(map[string]ConnPeer),
 		PeerPieceLog:      newPieceLog(pieceCount),
 		RequestedPieceLog: newPieceLog(pieceCount),
 		WriteLog:          make([]bool, pieceCount),
 		logger:            logger,
-		Piecer:            newPiecerFS(p),
+		Piecer:            piecer,
 	}
-	torrent.peerLock.Lock()
 
 	//this should start the torrent loop and return the torrent
 
@@ -206,11 +212,11 @@ func (t *Torrent) handleUnchoke(msg message) {
 }
 
 func (t *Torrent) unchoke(id string) {
-	t.peerLock.Unlock()
-	defer t.peerLock.Lock()
+	t.Lock()
+	defer t.Unlock()
 	p := t.peerConns[id]
 	p.PeerChoking(false)
-	level.Debug(t.logger).Log("peerUchoke", p.state())
+	level.Debug(t.logger).Log("peerUnchoke", p.state())
 }
 
 func (t *Torrent) handleShutdown() {
@@ -228,8 +234,8 @@ func (t *Torrent) handleShutdown() {
 }
 
 func (t *Torrent) sendInterest(msg message) {
-	t.peerLock.Unlock()
-	defer t.peerLock.Lock()
+	t.Lock()
+	defer t.Unlock()
 	p := t.peerConns[msg.source]
 	p.AmInterested(true)
 	p.Message(message{length: 1, kind: INTERST})
@@ -237,28 +243,52 @@ func (t *Torrent) sendInterest(msg message) {
 }
 
 func (t *Torrent) sendRequest(msg message) {
-	// Check for pieces we don't have
+	// This makes requests in order
+	p := t.peerConns[msg.source]
+	level.Debug(t.logger).Log("request", p)
+	OFFSET := 0
+	for i, piece := range t.WriteLog { // check the WriteLog
+		// if we havent' written or requested TODO add some sort of timeout to make sure requested pieces actually get written
+		// TODO consider a data structure that allows us to query the PieceLogs for the  rarest piece
+		if !piece && !(len(t.RequestedPieceLog.At(i)) > 0) {
+			if peers := t.PeerPieceLog.At(i); len(peers) > 0 { // And a peer has it
+				for pID, _ := range peers {
+					t.Lock()
+					p := t.peerConns[pID]
+					// TODO Remove this?
+					if p.GetPeerChoking() { // if we're being choked still
+						break
+					}
+					p.Message(buildRequest(
+						string(t.PeerId[:]),
+						i,
+						OFFSET,
+						int(t.ti.PieceLength),
+					))
+					t.Unlock()
+					t.RequestedPieceLog.LogSingle(pID, i)
+				}
+			}
+		}
+	}
 	// Check for pieces we haven't requested
 	// Check for pieces that peers have
 	// Request the rarest of those pieces first
 	// Record the request in the log
-	t.peerLock.Unlock()
-	defer t.peerLock.Lock()
-	p := t.peerConns[msg.source]
-	level.Debug(t.logger).Log("request", p)
 }
 
 type Piecer interface {
-	Write(int, int, []byte) error
+	Write(int, int, []byte, chan error)
 }
 
 type PiecerFS struct {
-	file      *os.File
-	path      string
-	blockSize int
+	file       *os.File
+	path       string
+	blockSize  int
+	pieceCount int
 }
 
-func newPiecerFS(path string, pieceCount int, blockSize int) (Piecer, error) {
+func newPiecerFS(path string, pieceCount int, blockSize int) (*PiecerFS, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
@@ -271,10 +301,12 @@ func newPiecerFS(path string, pieceCount int, blockSize int) (Piecer, error) {
 	}, nil
 }
 
-func (p *PiecerFS) Write(index int, begin int, data []byte) error {
+func (p *PiecerFS) Write(index int, begin int, data []byte, errChan chan error) {
 	offset := p.calcOffset(index, begin)
 	_, err := p.file.WriteAt(data, offset)
-	return err
+	if err != nil {
+		errChan <- err
+	}
 }
 
 func (p *PiecerFS) calcOffset(index, begin int) int64 {
@@ -282,6 +314,7 @@ func (p *PiecerFS) calcOffset(index, begin int) int64 {
 }
 
 type PieceLog struct {
+	sync.RWMutex
 	vector []map[string]struct{}
 }
 
@@ -290,7 +323,7 @@ func newPieceLog(length int) PieceLog {
 	for i := range vec {
 		vec[i] = make(map[string]struct{})
 	}
-	return PieceLog{vec}
+	return PieceLog{vector: vec}
 }
 func (p *PieceLog) LogField(id string, pieces []byte) error {
 	bitString := ""
@@ -306,6 +339,8 @@ func (p *PieceLog) LogField(id string, pieces []byte) error {
 }
 
 func (p *PieceLog) LogSingle(id string, piece int) {
+	p.Lock()
+	defer p.Unlock()
 	p.vector[piece][id] = struct{}{}
 }
 
@@ -324,6 +359,8 @@ func (p *PieceLog) String() (filled string) {
 }
 
 func (p *PieceLog) Logged() []bool {
+	p.RLock()
+	defer p.Unlock()
 	var have []bool
 	for i, piece := range p.vector {
 		if len(piece) > 0 {
@@ -334,14 +371,25 @@ func (p *PieceLog) Logged() []bool {
 	return have
 }
 
+// We need to start making these access synced
+func (p *PieceLog) At(index int) map[string]struct{} {
+	p.RLock()
+	defer p.RUnlock()
+	return p.vector[index]
+}
+
 type ConnPeer interface {
 	Message(message)
 	Connect(Handshake, chan message)
 	ParseMsgs(chan message)
 	AmChoking(bool)
+	GetAmChoking() bool
 	AmInterested(bool)
+	GetAmInterested() bool
 	PeerChoking(bool)
+	GetPeerChoking() bool
 	PeerInterested(bool)
+	GetPeerInterested() bool
 	state() string
 	ID() string
 }
@@ -375,12 +423,12 @@ func newPeer(IP string, Port int, logger log.Logger) *Peer {
 	}
 }
 
-func (p Peer) String() string {
+func (p *Peer) String() string {
 	pString := fmt.Sprintf("%s:%d", p.IP, p.Port)
 	return pString
 }
 
-func (p Peer) ID() string {
+func (p *Peer) ID() string {
 	return p.id
 }
 
@@ -388,16 +436,32 @@ func (p *Peer) AmChoking(choke bool) {
 	p.am_choking = choke
 }
 
+func (p *Peer) GetAmChoking() bool {
+	return p.am_choking
+}
+
 func (p *Peer) AmInterested(interest bool) {
 	p.am_interested = interest
+}
+
+func (p *Peer) GetAmInterested() bool {
+	return p.am_interested
 }
 
 func (p *Peer) PeerInterested(interest bool) {
 	p.peer_interested = interest
 }
 
+func (p *Peer) GetPeerInterested() bool {
+	return p.peer_interested
+}
+
 func (p *Peer) PeerChoking(choke bool) {
 	p.peer_choking = choke
+}
+
+func (p *Peer) GetPeerChoking() bool {
+	return p.peer_choking
 }
 
 func (p *Peer) Connect(hs Handshake, msgs chan message) {
@@ -445,7 +509,7 @@ func (p *Peer) ParseMsgs(msgs chan message) {
 		errCheck(err)
 		if err != nil {
 			// maybe we should make a reconnect mssage here?
-			fmt.Printf("Issue parsing:%e\n", err)
+			fmt.Printf("Issue parsing:%v, %+#v\n", err, msg)
 			break
 		}
 		msgs <- msg
@@ -461,13 +525,14 @@ func (p *Peer) state() string {
 }
 
 func (p *Peer) send(msg message) {
-	p.rw.Write(msg.Unmarshal())
+	fmt.Printf("Sending: %+v\n", msg)
+	p.conn.Write(msg.Unmarshal())
 	p.rw.Flush()
 }
 
 func errCheck(err error) {
 	if err != nil {
-		fmt.Printf("Problem: %e", err)
+		fmt.Printf("Problem: %v\n", err)
 	}
 }
 
@@ -493,10 +558,10 @@ func main() {
 	torrentBuf, err := os.Open(args[0])
 	errCheck(err)
 
-	ti, err := parseTorrent(torrentBuf, log.With(logger, "piece", "torrentInfo"))
+	ti, err := parseTorrent(torrentBuf, log.With(logger, "component", "TorrentInfo"))
 	errCheck(err)
 
-	t, err := newTorrent(*ti, log.With(logger, "piece", "Torrent"))
+	t, err := newTorrent(*ti, log.With(logger, "component", "Torrent"))
 	signal.Notify(t.quitCh, os.Interrupt)
 	errCheck(err)
 
@@ -504,9 +569,9 @@ func main() {
 	level.Debug(logger).Log("PeerList", spew.Sdump(t.PeerList))
 	p := t.PeerList[1]
 	p.Connect(t.Handshake, t.msgs)
-	t.peerLock.Unlock()
+	t.Lock()
 	t.peerConns[p.ID()] = p
-	t.peerLock.Lock()
+	t.Unlock()
 	for {
 		select {
 		case msg := <-t.msgs:

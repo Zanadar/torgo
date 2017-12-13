@@ -98,3 +98,17 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 
 	return msg, nil
 }
+
+func buildRequest(id string, idx int, offset int, blockSize int) message {
+	var payload bytes.Buffer
+	binary.Write(&payload, binary.BigEndian, int64(idx))
+	binary.Write(&payload, binary.BigEndian, int64(offset))
+	binary.Write(&payload, binary.BigEndian, int64(blockSize))
+
+	return message{
+		kind:    REQ,
+		source:  id,
+		length:  13,
+		payload: payload.Bytes(),
+	}
+}
