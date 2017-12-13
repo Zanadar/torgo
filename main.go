@@ -526,8 +526,13 @@ func (p *Peer) state() string {
 
 func (p *Peer) send(msg message) {
 	fmt.Printf("Sending: %+v\n", msg)
-	p.conn.Write(msg.Unmarshal())
-	p.rw.Flush()
+	n, err := p.conn.Write(msg.Unmarshal())
+	if n != msg.length {
+		fmt.Printf("Tried to send %v bytes but sent %v\n", msg.length, n)
+	}
+	errCheck(err)
+	err = p.rw.Flush()
+	errCheck(err)
 }
 
 func errCheck(err error) {

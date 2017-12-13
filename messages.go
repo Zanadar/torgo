@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -30,14 +31,6 @@ const (
 
 var reserved = [8]byte{}
 
-type Handshake struct {
-	_        [1]byte  // pstrlen
-	_        [19]byte // pstr
-	_        [8]byte  //reserved
-	InfoHash [20]byte
-	PeerId   [20]byte
-}
-
 type message struct {
 	source  string
 	length  int
@@ -52,6 +45,18 @@ func (m message) Unmarshal() []byte {
 	binary.Write(&buf, binary.BigEndian, m.payload)
 
 	return buf.Bytes()
+}
+
+func (m message) String() string {
+	return fmt.Sprintf("source: %s len: %s, kind: %s\n%v", m.source, m.length, m.kind, m.Unmarshal())
+}
+
+type Handshake struct {
+	_        [1]byte  // pstrlen
+	_        [19]byte // pstr
+	_        [8]byte  //reserved
+	InfoHash [20]byte
+	PeerId   [20]byte
 }
 
 func Unmarshal(r io.Reader) (*Handshake, error) {
@@ -84,7 +89,7 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 	}
 
 	mlen := binary.BigEndian.Uint32(lenBytes)
-	msg.length = int(mlen) // handle the special case of a keepalive
+	msg.length = int(mlen) // TODO handle the special case of a keepalive
 
 	mkind, err := r.ReadByte()
 	errCheck(err)
@@ -101,9 +106,9 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 
 func buildRequest(id string, idx int, offset int, blockSize int) message {
 	var payload bytes.Buffer
-	binary.Write(&payload, binary.BigEndian, int64(idx))
-	binary.Write(&payload, binary.BigEndian, int64(offset))
-	binary.Write(&payload, binary.BigEndian, int64(blockSize))
+	binary.Write(&payload, binary.BigEndian, int32(idx))
+	binary.Write(&payload, binary.BigEndian, int32(offset))
+	binary.Write(&payload, binary.BigEndian, int32(blockSize))
 
 	return message{
 		kind:    REQ,
