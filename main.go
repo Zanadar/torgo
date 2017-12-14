@@ -225,8 +225,6 @@ func (t *Torrent) handlePiece(msg message) {
 		fmt.Printf("Problem with piece %v at offset %v: %v\n", index, offset, err)
 		t.errChan <- err
 	}
-	fmt.Println("Down here")
-	return
 }
 
 func (t *Torrent) unchoke(id string) {
@@ -612,10 +610,12 @@ func main() {
 				t.sendRequest(msg)
 			case msg.kind == PIECE:
 				t.handlePiece(msg)
+				fmt.Println("Back")
 			default:
 				level.Debug(logger).Log("msg", msg)
 			}
 		case err := <-t.errChan: //TODO use this more
+			fmt.Println("In error situation")
 			level.Error(logger).Log("err", err)
 		case <-t.quitCh:
 			fmt.Println("Shutdown received")

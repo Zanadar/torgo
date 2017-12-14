@@ -48,7 +48,7 @@ func (m message) Unmarshal() []byte {
 }
 
 func (m message) String() string {
-	return fmt.Sprintf("source: %s len: %s, kind: %s \n %v\n", m.source, m.length, m.kind, m.Unmarshal())
+	return fmt.Sprintf("source: %v len: %v, kind: %v payload len: %v\n", m.source, m.length, m.kind, len(m.payload))
 }
 
 type Handshake struct {
@@ -96,7 +96,10 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 	msg.kind = msgID(mkind)
 
 	payload := make([]byte, mlen-1, mlen-1)
-	n, err = r.Read(payload)
+	n, err = io.ReadFull(r, payload)
+	if n != int(mlen-1) {
+		fmt.Printf("expected %v bytes but read %v", mlen, n)
+	}
 	errCheck(err)
 
 	msg.payload = payload
