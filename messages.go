@@ -48,7 +48,7 @@ func (m message) Unmarshal() []byte {
 }
 
 func (m message) String() string {
-	return fmt.Sprintf("source: %s len: %s, kind: %s\n%v", m.source, m.length, m.kind, m.Unmarshal())
+	return fmt.Sprintf("source: %s len: %s, kind: %s \n %v\n", m.source, m.length, m.kind, m.Unmarshal())
 }
 
 type Handshake struct {
@@ -105,6 +105,10 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 }
 
 func buildRequest(id string, idx int, offset int, blockSize int) message {
+
+	fmt.Printf("offset: %v\n", offset)
+	fmt.Printf("Blocksize: %v\n", blockSize)
+	fmt.Printf("Blocksize: %v\n", int32(blockSize))
 	var payload bytes.Buffer
 	binary.Write(&payload, binary.BigEndian, int32(idx))
 	binary.Write(&payload, binary.BigEndian, int32(offset))

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-kit/kit/log"
@@ -211,6 +212,23 @@ func (t *Torrent) handleUnchoke(msg message) {
 	t.unchoke(msg.source)
 }
 
+func (t *Torrent) handlePiece(msg message) {
+
+	index := int(binary.BigEndian.Uint32(msg.payload[0:4]))
+	offset := int(binary.BigEndian.Uint32(msg.payload[4:8]))
+	data := msg.payload[8:]
+	err := t.Piecer.Write(index, offset, data)
+	if err == nil {
+		fmt.Printf("Wrote piece at index %v", index)
+		t.WriteLog[index] = true
+	} else {
+		fmt.Printf("Problem with piece %v at offset %v: %v\n", index, offset, err)
+		t.errChan <- err
+	}
+	fmt.Println("Down here")
+	return
+}
+
 func (t *Torrent) unchoke(id string) {
 	t.Lock()
 	defer t.Unlock()
@@ -278,7 +296,7 @@ func (t *Torrent) sendRequest(msg message) {
 }
 
 type Piecer interface {
-	Write(int, int, []byte, chan error)
+	Write(int, int, []byte) error
 }
 
 type PiecerFS struct {
@@ -301,12 +319,11 @@ func newPiecerFS(path string, pieceCount int, blockSize int) (*PiecerFS, error) 
 	}, nil
 }
 
-func (p *PiecerFS) Write(index int, begin int, data []byte, errChan chan error) {
+func (p *PiecerFS) Write(index int, begin int, data []byte) error {
 	offset := p.calcOffset(index, begin)
 	_, err := p.file.WriteAt(data, offset)
-	if err != nil {
-		errChan <- err
-	}
+
+	return err
 }
 
 func (p *PiecerFS) calcOffset(index, begin int) int64 {
@@ -527,7 +544,7 @@ func (p *Peer) state() string {
 func (p *Peer) send(msg message) {
 	fmt.Printf("Sending: %+v\n", msg)
 	n, err := p.conn.Write(msg.Unmarshal())
-	if n != msg.length {
+	if n-4 != msg.length {
 		fmt.Printf("Tried to send %v bytes but sent %v\n", msg.length, n)
 	}
 	errCheck(err)
@@ -577,23 +594,29 @@ func main() {
 	t.Lock()
 	t.peerConns[p.ID()] = p
 	t.Unlock()
+	ticker := time.Tick(5 * time.Second)
 	for {
 		select {
+		case <-ticker:
+			fmt.Println("Tick")
 		case msg := <-t.msgs:
 			switch {
 			case msg.kind == BITFLD:
 				t.handleBitfield(msg)
 				t.sendInterest(msg)
-				// Send INTERST to peer
 			case msg.kind == HAVE:
 				t.handleHave(msg)
 				t.sendInterest(msg)
 			case msg.kind == UNCHOKE:
 				t.handleUnchoke(msg)
 				t.sendRequest(msg)
+			case msg.kind == PIECE:
+				t.handlePiece(msg)
 			default:
-				level.Debug(logger).Log("msg", spew.Sdump(msg))
+				level.Debug(logger).Log("msg", msg)
 			}
+		case err := <-t.errChan: //TODO use this more
+			level.Error(logger).Log("err", err)
 		case <-t.quitCh:
 			fmt.Println("Shutdown received")
 			t.handleShutdown()
