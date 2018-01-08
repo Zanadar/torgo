@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -95,6 +97,7 @@ func (ti *TorrentInfo) callTracker(logger log.Logger) (*TrackerResponse, error) 
 			}
 			ipString := fmt.Sprintf("%d.%d.%d.%d", ip...)
 			port := int(peerBytes[4])*256 + int(peerBytes[5])
+			spew.Dump(peerBytes)
 			peers = append(peers, newPeer(ipString, port, log.With(logger, "Peer", ipString)))
 		}
 	}
@@ -395,7 +398,7 @@ func (p *PieceLog) At(index int) map[string]struct{} {
 
 type ConnPeer interface {
 	Message(message)
-	Connect(Handshake, chan message)
+	Connect(Handshake, chan message) error
 	ParseMsgs(chan message)
 	AmChoking(bool)
 	GetAmChoking() bool
@@ -479,28 +482,34 @@ func (p *Peer) GetPeerChoking() bool {
 	return p.peer_choking
 }
 
-func (p *Peer) Connect(hs Handshake, msgs chan message) {
+func (p *Peer) Connect(hs Handshake, msgs chan message) error {
 	conn, err := net.Dial("tcp", p.String())
-	errCheck(err)
+	if err != nil {
+		return err
+	}
 	p.conn = conn
 	// save this somewhere
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	p.rw = rw
 	_, err = p.conn.Write(hs.Marshall())
-	errCheck(err)
+	if err != nil {
+		return err
+	}
 	err = rw.Flush()
-	errCheck(err)
+	if err != nil {
+		return err
+	}
 	r := io.Reader(rw)
 	reply, err := Unmarshal(r)
 	p.id = string(reply.PeerId[:])
 	//TODO verify that InfoHash returned matches the one we have
 
-	errCheck(err)
 	go p.ParseMsgs(msgs)
 	go p.readLoop()
 	level.Debug(p.logger).Log("connected", p.state())
 
 	//this should start the peer loop and return the peer
+	return nil
 }
 
 func (p *Peer) readLoop() {
@@ -574,6 +583,9 @@ func main() {
 		logger = log.NewLogfmtLogger(os.Stdout)
 		logger = level.NewFilter(logger, logLevel)
 	}
+	go func() {
+		fmt.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 
 	torrentBuf, err := os.Open(args[0])
 	errCheck(err)
@@ -587,11 +599,16 @@ func main() {
 
 	// DialPeer this should be in a goroutine?
 	level.Debug(logger).Log("PeerList", spew.Sdump(t.PeerList))
-	p := t.PeerList[1]
-	p.Connect(t.Handshake, t.msgs)
-	t.Lock()
-	t.peerConns[p.ID()] = p
-	t.Unlock()
+	for _, p := range t.PeerList {
+		err = p.Connect(t.Handshake, t.msgs)
+		if err != nil {
+			errCheck(err)
+			continue
+		}
+		t.Lock()
+		t.peerConns[p.ID()] = p
+		t.Unlock()
+	}
 	ticker := time.Tick(5 * time.Second)
 	for {
 		select {

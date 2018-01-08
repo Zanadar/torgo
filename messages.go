@@ -108,7 +108,6 @@ func readMessage(r *bufio.ReadWriter) (message, error) {
 }
 
 func buildRequest(id string, idx int, offset int, blockSize int) message {
-
 	fmt.Printf("offset: %v\n", offset)
 	fmt.Printf("Blocksize: %v\n", blockSize)
 	fmt.Printf("Blocksize: %v\n", int32(blockSize))
