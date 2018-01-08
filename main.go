@@ -483,7 +483,7 @@ func (p *Peer) GetPeerChoking() bool {
 }
 
 func (p *Peer) Connect(hs Handshake, msgs chan message) error {
-	conn, err := net.Dial("tcp", p.String())
+	conn, err := net.DialTimeout("tcp", p.String(), 2*time.Second)
 	if err != nil {
 		return err
 	}
